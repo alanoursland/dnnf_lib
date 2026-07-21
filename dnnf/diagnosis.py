@@ -148,6 +148,7 @@ class SystemModel:
         # mvlit -> weight (only non-default entries stored)
         self._prior_weights: Dict[int, float] = {}
         self._mode_vars: List[str] = []
+        self._prev_map: Dict[str, str] = {}  # mode name -> prev-var name
 
     def _register(self, var: FiniteVar) -> FiniteVar:
         if var.name in self.vars:
@@ -223,6 +224,31 @@ class SystemModel:
     def add(self, formula: Formula) -> None:
         self._constraints.append(formula)
 
+    def prev(self, name: str) -> FiniteVar:
+        """The previous-timestep copy of mode variable ``name``, for use
+        in **joint transition constraints** — hard relations between
+        consecutive slices that per-variable transition matrices cannot
+        express, e.g.::
+
+            m.add(~((m.prev("a") == "ok") & (m.prev("b") == "ok")
+                    & (a == "bad") & (b == "bad")))   # no common-cause pair failure
+
+        During tracking, :class:`dnnf.tracking.ModeTracker` conditions
+        the prev variables to each belief particle's modes, so these
+        constraints prune illegal transitions (pruned mass is
+        renormalized: probabilities are conditional on a legal
+        transition).  At t=0 prev variables are unconstrained.
+        """
+        if name not in self._mode_vars:
+            raise KeyError(f"{name!r} is not a mode variable")
+        if name in self._prev_map:
+            return self.vars[self._prev_map[name]]
+        cur = self.vars[name]
+        fd_var = self.cnf.spec.add_var(len(cur.values))
+        pv = self._register(FiniteVar(f"{name}@prev", cur.values, fd_var))
+        self._prev_map[name] = pv.name
+        return pv
+
     def sensor(
         self,
         name: str,
@@ -265,6 +291,7 @@ class SystemModel:
             variables=dict(self.vars),
             prior_weights=dict(self._prior_weights),
             mode_vars=list(self._mode_vars),
+            prev_map=dict(self._prev_map),
         )
 
 
@@ -275,10 +302,12 @@ class CompiledSystem:
         variables: Dict[str, FiniteVar],
         prior_weights: Dict[int, float],
         mode_vars: List[str],
+        prev_map: Optional[Dict[str, str]] = None,
     ):
         self.circuit = circuit
         self.vars = variables
         self.mode_vars = mode_vars
+        self.prev_map = prev_map or {}
         self._weights = [1.0] * circuit.spec.total
         for mvlit, w in prior_weights.items():
             self._weights[mvlit] = w

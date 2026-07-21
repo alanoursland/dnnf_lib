@@ -140,7 +140,15 @@ class ModeTracker:
                 for name, dist in correlated.items():
                     if transitions is None or name not in transitions:
                         mode_priors[name] = dist
-            log_w = self.system.log_weights_for(evidence, mode_priors)
+            # Joint transition constraints: condition the compiled
+            # prev-slice variables to this particle's modes, so hard
+            # relations between consecutive slices prune candidates.
+            step_evidence = evidence
+            if self.system.prev_map:
+                step_evidence = dict(evidence)
+                for mode_name, prev_name in self.system.prev_map.items():
+                    step_evidence[prev_name] = prev[mode_name]
+            log_w = self.system.log_weights_for(step_evidence, mode_priors)
             for cost, modes in self.system.ranked_map(log_w, self.expand):
                 key = tuple(sorted(modes.items()))
                 candidates.setdefault(key, []).append(log_mass - cost)
