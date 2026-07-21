@@ -144,6 +144,35 @@ class SystemModel:
     def add(self, formula: Formula) -> None:
         self._constraints.append(formula)
 
+    def sensor(
+        self,
+        name: str,
+        expr: Formula,
+        false_positive: float = 0.0,
+        false_negative: float = 0.0,
+    ) -> Prop:
+        """Declare an observable that noisily reports ``expr``.
+
+        ``P(name=True | expr) = 1 - false_negative`` and
+        ``P(name=True | ~expr) = false_positive``, implemented with hidden
+        fault-injection variables (named ``_<name>_fp`` / ``_<name>_fn``,
+        excluded from reported diagnosis states).  With both rates zero
+        this is just ``add(iff(name, expr))``.
+        """
+        from .formula import Not, iff
+
+        s = self.bool(name)
+        true_when: Formula = expr
+        if false_negative > 0.0:
+            g_fn = self.bool(f"_{name}_fn", prior=false_negative)
+            true_when = expr & ~g_fn
+        if false_positive > 0.0:
+            g_fp = self.bool(f"_{name}_fp", prior=false_positive)
+            self._constraints.append(iff(s, true_when | (Not(expr) & g_fp)))
+        else:
+            self._constraints.append(iff(s, true_when))
+        return s
+
     # ------------------------------------------------------------------
     def compile(
         self,
@@ -313,11 +342,30 @@ class CompiledSystem:
         log_z = _eval.log_wmc(self.circuit, log_w)
         if log_z == -math.inf:
             return []
+        return [
+            Diagnosis(
+                modes=modes,
+                state=dict(modes),
+                cost=cost,
+                posterior=math.exp(-cost - log_z),
+            )
+            for cost, modes in self.ranked_map(log_w, k)
+        ]
+
+    def ranked_map(
+        self, log_w: Sequence[float], k: Optional[int]
+    ) -> List[Tuple[float, Dict[str, str]]]:
+        """Ranked joint mode assignments under an explicit log-weight
+        vector: ``(cost, {mode_var: value})`` with ``cost = -log`` of the
+        summed (unnormalized) mass.  Building block for
+        :meth:`map_diagnoses` and temporal tracking."""
+        from .kbest import enumerate_map
+
         map_vars = [
             i for name in self.mode_vars
             for i in self.finites[name].var_ids
         ]
-        out: List[Diagnosis] = []
+        out: List[Tuple[float, Dict[str, str]]] = []
         for cost, assignment in enumerate_map(
             self.circuit, log_w, map_vars, k=k
         ):
@@ -325,15 +373,28 @@ class CompiledSystem:
                 name: self._decode_finite(name, assignment)
                 for name in self.mode_vars
             }
-            out.append(
-                Diagnosis(
-                    modes=modes,
-                    state=dict(modes),
-                    cost=cost,
-                    posterior=math.exp(-cost - log_z),
-                )
-            )
+            out.append((cost, modes))
         return out
+
+    def log_weights_for(
+        self,
+        evidence: Dict[str, EvidenceValue],
+        mode_priors: Optional[Dict[str, Dict[str, float]]] = None,
+    ) -> List[float]:
+        """Log literal weights with evidence applied and, optionally, the
+        static mode priors of some variables replaced (``{mode_var:
+        {value: prob}}``).  Mode variables not listed keep their compiled
+        priors."""
+        weights = list(self._weights)
+        if mode_priors:
+            for name, dist in mode_priors.items():
+                fv = self.finites[name]
+                for value, var in zip(fv.values, fv.var_ids):
+                    weights[lit_index(var)] = dist.get(value, 0.0)
+        assign = self._evidence_assignment(evidence)
+        for var, val in assign.items():
+            weights[lit_index(-var if val else var)] = 0.0
+        return [-math.inf if w <= 0 else math.log(w) for w in weights]
 
     def mode_posteriors(
         self, evidence: Dict[str, EvidenceValue]
@@ -371,6 +432,8 @@ class CompiledSystem:
     ) -> Dict[str, EvidenceValue]:
         state: Dict[str, EvidenceValue] = {}
         for name, prop in self.bools.items():
+            if name.startswith("_"):
+                continue  # hidden noise-injection variables
             if prop.var in assignment:
                 state[name] = assignment[prop.var]
         for name in self.finites:

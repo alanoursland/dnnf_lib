@@ -72,6 +72,14 @@ during compilation (`modes_first=True`, the default), which constrains the
 circuit so that max-over-modes / sum-over-everything-else is a single
 sweep plus lazy k-best enumeration.
 
+Sensors can be noisy (`m.sensor("alarm", expr, false_positive=0.1,
+false_negative=0.2)`), and `dnnf.ModeTracker` runs the monitoring loop:
+per-mode transition matrices, observations each timestep, and a
+beam-filtered belief over joint mode assignments (exact HMM filtering when
+the beam covers the mode space — see `examples/home_battery.py` for a
+degrading-battery week of telemetry, and `docs/MODELING_NOTES.md` for
+ergonomics findings from that experiment).
+
 ## GPU / batched evaluation (PyTorch)
 
 ```python

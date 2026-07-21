@@ -150,16 +150,15 @@ diagnosis: the compiled circuit is an exact, differentiable likelihood.
 
 ## Horizon 5 — Blue sky (research-grade)
 
-- **Temporal diagnosis / mode tracking.** The mission version of this
-  problem is filtering: modes evolve, commands are issued, evidence
-  arrives per timestep (Livingstone-style tracking). Compile the
-  transition relation once, then either (a) unroll k steps into one
-  circuit for fixed-lag smoothing, or (b) maintain a belief state over
-  modes and advance it through the compiled transition circuit each tick.
-  The GPU backend makes the belief-state sweep cheap; the k-best semiring
-  gives ranked *trajectories* (most probable fault sequences, not just
-  states). This would make the library a real successor to the original
-  system rather than a snapshot of it.
+- **Temporal diagnosis / mode tracking.** ✅ *First version done:*
+  `dnnf.ModeTracker` maintains a beam-filtered belief over joint mode
+  assignments with per-variable transition matrices, exact HMM filtering
+  when the beam covers the mode space (verified against a hand-rolled
+  forward recursion). Remaining: compiled transition *relations* (joint
+  constraints between consecutive modes, e.g. "cannot go dead to ok"),
+  fixed-lag smoothing via k-step unrolling, ranked fault *trajectories*
+  (k-best over paths, not just states), and running the per-step sweeps
+  on the GPU backend.
 - **Decision-making on top.** With P(mode | evidence) exact and cheap,
   add value-of-information queries: which next sensor reading or active
   test most reduces diagnosis entropy? (Greedy VOI is just a few
