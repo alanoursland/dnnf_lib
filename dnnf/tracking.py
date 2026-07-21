@@ -97,19 +97,31 @@ class ModeTracker:
 
     # ------------------------------------------------------------------
     def step(
-        self, evidence: Dict[str, EvidenceValue]
+        self,
+        evidence: Dict[str, EvidenceValue],
+        transitions: Optional[Transitions] = None,
     ) -> List[Tuple[Dict[str, str], float]]:
         """Advance one timestep with the given observations; returns the
         updated (normalized) belief as ``[(modes, prob), ...]``, most
         probable first.  Raises ValueError if the evidence is inconsistent
         with every tracked trajectory (belief collapse — enlarge the beam
-        or check the model)."""
+        or check the model).
+
+        ``transitions``, if given, overrides the tracker's transition
+        matrices *for this step only* (per mode variable; unlisted
+        variables keep their defaults).  This is how command-conditioned
+        dynamics work: pass the matrix matching what was commanded this
+        tick — e.g. a valve only risks transitioning to ``stuck_open``
+        on a step where it was actually commanded to open."""
+        step_transitions = dict(self.transitions)
+        if transitions:
+            step_transitions.update(transitions)
         candidates: Dict[ModeAssignment, List[float]] = {}
         for modes_key, log_mass in self._belief.items():
             prev = dict(modes_key)
             mode_priors = {
                 name: matrix[prev[name]]
-                for name, matrix in self.transitions.items()
+                for name, matrix in step_transitions.items()
             }
             log_w = self.system.log_weights_for(evidence, mode_priors)
             for cost, modes in self.system.ranked_map(log_w, self.expand):

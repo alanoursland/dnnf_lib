@@ -126,17 +126,15 @@ def run_one(name: str, cnf, heuristic: str) -> Optional[Dict[str, object]]:
     from dnnf import fd
 
     if isinstance(cnf, fd.FDCnf):
-        if heuristic != "dynamic":
-            return None  # static heuristics not yet ported to FD
         t0 = time.time()
-        circuit = fd.compile_fd(cnf, smooth=True)
+        circuit = fd.compile_fd(cnf, smooth=True, heuristic=heuristic)
         compile_s = time.time() - t0
         t0 = time.time()
         count = fd.model_count(circuit)
         query_s = time.time() - t0
         return {
             "instance": name,
-            "heuristic": "dynamic",
+            "heuristic": heuristic,
             "nodes": len(circuit),
             "edges": circuit.num_edges,
             "compile_s": compile_s,

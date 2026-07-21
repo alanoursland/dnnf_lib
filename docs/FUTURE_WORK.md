@@ -130,10 +130,14 @@ leverage:
 This is where the neglog-probability observation pays out beyond faster
 diagnosis: the compiled circuit is an exact, differentiable likelihood.
 
-- **Learned priors.** Leaf weights as `nn.Parameter`; maximize log-WMC of
-  observed evidence over operational telemetry. Closed-form EM updates
-  exist on d-DNNF (expected "circuit flows" are exactly the marginals the
-  backward pass already computes), so both SGD and EM are available.
+- **Learned priors.** ✅ *CPU EM done:* `CompiledSystem.fit_priors()`
+  learns value priors from partially observed telemetry by exact EM
+  (posterior WMC ratios as the E-step), verified to recover known failure
+  rates from alarm-only observations; `sample_state()` provides exact
+  model sampling for simulation and synthetic data. Remaining: the
+  gradient path — leaf weights as `nn.Parameter`, minibatch SGD on the
+  torch backend for large telemetry sets and coupled/conditional
+  parameterizations that EM's independent-categorical M-step can't fit.
   Result: failure priors estimated from fleet data instead of engineering
   guesses, with the logical model as a hard constraint.
 - **Neural observation models.** Raw sensor streams rarely arrive as clean

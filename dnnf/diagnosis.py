@@ -422,15 +422,19 @@ class CompiledSystem:
             out.append((cost, modes))
         return out
 
-    def mode_posteriors(
-        self, evidence: Dict[str, EvidenceValue]
+    def posteriors(
+        self,
+        evidence: Dict[str, EvidenceValue],
+        names: Optional[Sequence[str]] = None,
     ) -> Dict[str, Dict[str, float]]:
-        """Exact ``P(mode = value | evidence)`` via WMC ratios."""
+        """Exact ``P(var = value | evidence)`` via WMC ratios for the
+        named variables (default: mode variables).  Works for any
+        declared variable, including hidden sensor-noise variables."""
         log_z = self.log_evidence(evidence)
         if log_z == -math.inf:
             raise ValueError("evidence is inconsistent with the model")
         out: Dict[str, Dict[str, float]] = {}
-        for name in self.mode_vars:
+        for name in (self.mode_vars if names is None else names):
             var = self.vars[name]
             dist: Dict[str, float] = {}
             for value in var.values:
@@ -439,6 +443,78 @@ class CompiledSystem:
                 dist[value] = math.exp(self.log_evidence(ev) - log_z)
             out[name] = dist
         return out
+
+    def mode_posteriors(
+        self, evidence: Dict[str, EvidenceValue]
+    ) -> Dict[str, Dict[str, float]]:
+        """Exact ``P(mode = value | evidence)`` via WMC ratios."""
+        return self.posteriors(evidence)
+
+    # -- learning -------------------------------------------------------
+    def fit_priors(
+        self,
+        observations: Sequence[Dict[str, EvidenceValue]],
+        names: Optional[Sequence[str]] = None,
+        iterations: int = 25,
+        tol: float = 1e-6,
+    ) -> List[float]:
+        """Learn value priors for the named variables (default: modes)
+        from partially observed telemetry, by expectation-maximization.
+
+        Each observation is an evidence dict (any subset of variables).
+        E-step: exact posteriors of the fitted variables given each
+        observation under the current priors (WMC ratios on the compiled
+        circuit).  M-step: each fitted variable's prior becomes the
+        average posterior.  This is exact EM for the model class
+        (independent categorical priors + the compiled constraint/noise
+        structure), so the returned per-iteration average log-likelihood
+        is non-decreasing; iteration stops early when it improves by
+        less than ``tol``.
+
+        Priors are updated in place (subsequent queries use them).
+        Returns the log-likelihood trace.
+        """
+        fit_names = list(self.mode_vars if names is None else names)
+        spec = self.circuit.spec
+        history: List[float] = []
+        for _ in range(iterations):
+            sums = {
+                name: [0.0] * len(self.vars[name].values)
+                for name in fit_names
+            }
+            log_lik = 0.0
+            for obs in observations:
+                log_lik += self.log_evidence(obs)
+                post = self.posteriors(obs, fit_names)
+                for name in fit_names:
+                    values = self.vars[name].values
+                    for i, value in enumerate(values):
+                        sums[name][i] += post[name][value]
+            history.append(log_lik / max(len(observations), 1))
+            for name in fit_names:
+                var = self.vars[name]
+                total = sum(sums[name])
+                for i in range(len(var.values)):
+                    w = sums[name][i] / total if total > 0 else 0.0
+                    mvlit = spec.mvlit(var.fd_var, i)
+                    self._weights[mvlit] = w
+                    self._costs[mvlit] = (
+                        math.inf if w <= 0 else -math.log(w)
+                    )
+            if len(history) >= 2 and history[-1] - history[-2] < tol:
+                break
+        return history
+
+    def sample_state(self, rng) -> Dict[str, EvidenceValue]:
+        """Draw one complete system state from the model's current
+        weighted distribution (priors + constraints).  Useful for
+        simulation and for generating synthetic telemetry."""
+        assignment = fd.sample(
+            self.circuit, self.log_weights_for({}), rng
+        )
+        if assignment is None:
+            raise ValueError("model has zero total mass")
+        return self._decode_state(assignment)
 
     # -- decoding -------------------------------------------------------
     def _decode_state(

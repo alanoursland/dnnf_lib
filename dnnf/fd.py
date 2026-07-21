@@ -460,6 +460,7 @@ def compile_fd(
     cnf: FDCnf,
     var_order: Optional[Sequence[int]] = None,
     smooth: bool = False,
+    heuristic: str = "dynamic",
 ) -> FDCircuit:
     """Compile an FD-CNF to a finite-domain decision-DNNF.
 
@@ -467,7 +468,14 @@ def compile_fd(
     connected-component decomposition (decomposable ANDs), d-way branching
     (deterministic ORs), component caching — but decisions enumerate a
     variable's domain directly, so there are no encoding artifacts.
+    ``heuristic``: ``"dynamic"`` (most occurrences, default) or
+    ``"minfill"`` (static, see :func:`minfill_order`); ignored when
+    ``var_order`` is given.
     """
+    if var_order is None and heuristic == "minfill":
+        var_order = minfill_order(cnf)
+    elif var_order is None and heuristic != "dynamic":
+        raise ValueError(f"unknown heuristic {heuristic!r}")
     spec = cnf.spec
     builder = FDBuilder(spec)
     if any(clause == () for clause in cnf.clauses):
@@ -612,6 +620,85 @@ def mpe(
         elif kind == OR:
             stack.append(min(circuit.children[i], key=lambda c: vals[c]))
     return best, assignment
+
+
+def sample(
+    circuit: FDCircuit, log_weights: Sequence[float], rng
+) -> Optional[Dict[int, int]]:
+    """Draw one exact sample from the distribution the weighted circuit
+    defines: ``P(model) proportional to product of value weights``.
+
+    Top-down: at each OR node a child is chosen with probability
+    proportional to its weighted model mass (one log-sum-exp sweep
+    computes all masses); AND nodes take every child.  Requires a smooth
+    d-DNNF; returns None if the circuit has zero mass.
+    """
+    circuit = _ensure_smooth(circuit)
+    vals = log_values(circuit, log_weights)
+    if vals[circuit.root] == -math.inf:
+        return None
+    assignment: Dict[int, int] = {}
+    stack = [circuit.root]
+    while stack:
+        i = stack.pop()
+        kind = circuit.kinds[i]
+        if kind == LIT:
+            var, val = circuit.spec.decode(circuit.lits[i])
+            assignment[var] = val
+        elif kind == AND:
+            stack.extend(circuit.children[i])
+        elif kind == OR:
+            total = vals[i]
+            u = rng.random()
+            acc = 0.0
+            chosen = circuit.children[i][-1]
+            for c in circuit.children[i]:
+                if vals[c] == -math.inf:
+                    continue
+                acc += math.exp(vals[c] - total)
+                if u <= acc:
+                    chosen = c
+                    break
+            stack.append(chosen)
+    return assignment
+
+
+def minfill_order(cnf: FDCnf) -> List[int]:
+    """Min-fill elimination order over the FD primal graph, reversed for
+    branch-first-on-central-variables (see the boolean
+    :func:`dnnf.compiler.minfill_order`)."""
+    adj: Dict[int, set] = {v: set() for v in range(cnf.spec.num_vars)}
+    for clause in cnf.clauses:
+        cvars = [var for var, _ in clause]
+        for i in range(len(cvars)):
+            for j in range(i + 1, len(cvars)):
+                adj[cvars[i]].add(cvars[j])
+                adj[cvars[j]].add(cvars[i])
+    remaining = set(adj)
+    elim: List[int] = []
+
+    def fill_cost(v: int) -> int:
+        nbrs = list(adj[v])
+        return sum(
+            1
+            for i in range(len(nbrs))
+            for j in range(i + 1, len(nbrs))
+            if nbrs[j] not in adj[nbrs[i]]
+        )
+
+    while remaining:
+        v = min(remaining, key=lambda u: (fill_cost(u), len(adj[u]), u))
+        nbrs = list(adj[v])
+        for i in range(len(nbrs)):
+            for j in range(i + 1, len(nbrs)):
+                adj[nbrs[i]].add(nbrs[j])
+                adj[nbrs[j]].add(nbrs[i])
+        for u in nbrs:
+            adj[u].discard(v)
+        del adj[v]
+        remaining.remove(v)
+        elim.append(v)
+    return list(reversed(elim))
 
 
 # ----------------------------------------------------------------------

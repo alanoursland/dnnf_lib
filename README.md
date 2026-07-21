@@ -87,6 +87,21 @@ m.add((leak == "large") >> level.below(10.0))
 sys.log_evidence({"level": 37.2})     # numeric evidence, bucketed for you
 ```
 
+Compiled systems are also **generative and learnable**:
+
+```python
+state = sys.sample_state(rng)            # exact simulation from the model
+telemetry = [{"alarm": sys.sample_state(rng)["alarm"]} for _ in range(4000)]
+sys.fit_priors(telemetry)                # EM: learn failure rates from
+                                         # partially observed telemetry
+sys.posteriors(evidence, names=[...])    # exact marginals for any variable
+```
+
+`fit_priors` is exact expectation-maximization on the circuit (E-step:
+WMC-ratio posteriors; M-step: average), with a guaranteed non-decreasing
+likelihood — failure priors estimated from fleet data instead of
+engineering guesses, with the logical model as a hard constraint.
+
 Sensors can be noisy (`m.sensor("alarm", expr, false_positive=0.1,
 false_negative=0.2)`), and `dnnf.ModeTracker` runs the monitoring loop:
 per-mode transition matrices, observations each timestep, and a
