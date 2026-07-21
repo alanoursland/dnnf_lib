@@ -372,88 +372,157 @@ class FDBuilder:
 
 
 # ----------------------------------------------------------------------
-# Compilation: exhaustive d-way DPLL with components and caching
+# Compilation: exhaustive d-way DPLL with components and caching.
+#
+# Clauses are interned to integer ids: residual states are frozensets of
+# ints (cheap to hash at every search node), per-clause conditioning
+# results are memoized globally in `_assign_cache`, and clauses untouched
+# by an assignment keep their id without being rescanned.  This is where
+# the compile-time constants live — the search itself is unchanged.
 # ----------------------------------------------------------------------
-def _assign(clauses: FrozenSet[FDClause], var: int, val: int) -> FrozenSet[FDClause]:
-    out = []
-    for clause in clauses:
-        keep: List[FDLit] = []
-        satisfied = False
-        for cvar, vs in clause:
-            if cvar == var:
-                if val in vs:
-                    satisfied = True
-                    break
-            else:
-                keep.append((cvar, vs))
-        if not satisfied:
-            out.append(tuple(keep))
-    return frozenset(out)
+class _FDCompiler:
+    def __init__(self, cnf: FDCnf, var_order: Optional[Sequence[int]]):
+        self.spec = cnf.spec
+        self.var_order = var_order
+        self.builder = FDBuilder(cnf.spec)
+        self.table: List[FDClause] = []
+        self.cvars: List[frozenset] = []
+        self.index: Dict[FDClause, int] = {}
+        # (clause id, var, val) -> new clause id, or -1 when satisfied
+        self._assign_cache: Dict[Tuple[int, int, int], int] = {}
+        self.memo: Dict[FrozenSet[int], int] = {}
 
+    def intern(self, clause: FDClause) -> int:
+        cid = self.index.get(clause)
+        if cid is None:
+            cid = len(self.table)
+            self.table.append(clause)
+            self.cvars.append(frozenset(var for var, _ in clause))
+            self.index[clause] = cid
+        return cid
 
-def _bcp_fd(
-    clauses: FrozenSet[FDClause],
-) -> Tuple[Optional[Dict[int, int]], FrozenSet[FDClause]]:
-    """Propagate forced assignments (unit clauses whose single literal has a
-    single value).  Returns (assignments, residual); assignments None on
-    conflict."""
-    assigned: Dict[int, int] = {}
-    current = clauses
-    while True:
-        if () in current:
-            return None, frozenset()
-        forced: Dict[int, int] = {}
-        for clause in current:
-            if len(clause) == 1 and len(clause[0][1]) == 1:
-                var, vs = clause[0]
-                (val,) = vs
-                if forced.get(var, val) != val:
+    def assign_clause(self, cid: int, var: int, val: int) -> int:
+        if var not in self.cvars[cid]:
+            return cid
+        key = (cid, var, val)
+        r = self._assign_cache.get(key)
+        if r is None:
+            keep: List[FDLit] = []
+            satisfied = False
+            for cvar, vs in self.table[cid]:
+                if cvar == var:
+                    if val in vs:
+                        satisfied = True
+                        break
+                else:
+                    keep.append((cvar, vs))
+            r = -1 if satisfied else self.intern(tuple(keep))
+            self._assign_cache[key] = r
+        return r
+
+    def assign_set(
+        self, cids: FrozenSet[int], var: int, val: int
+    ) -> FrozenSet[int]:
+        out = set()
+        for cid in cids:
+            r = self.assign_clause(cid, var, val)
+            if r >= 0:
+                out.add(r)
+        return frozenset(out)
+
+    def bcp(
+        self, cids: FrozenSet[int]
+    ) -> Tuple[Optional[Dict[int, int]], FrozenSet[int]]:
+        assigned: Dict[int, int] = {}
+        current = cids
+        while True:
+            forced: Dict[int, int] = {}
+            for cid in current:
+                clause = self.table[cid]
+                if not clause:
                     return None, frozenset()
-                forced[var] = val
-        if not forced:
-            return assigned, current
-        for var, val in forced.items():
-            if assigned.get(var, val) != val:
-                return None, frozenset()
-            assigned[var] = val
-            current = _assign(current, var, val)
+                if len(clause) == 1 and len(clause[0][1]) == 1:
+                    var, vs = clause[0]
+                    (val,) = vs
+                    if forced.get(var, val) != val:
+                        return None, frozenset()
+                    forced[var] = val
+            if not forced:
+                return assigned, current
+            for var, val in forced.items():
+                if assigned.get(var, val) != val:
+                    return None, frozenset()
+                assigned[var] = val
+                current = self.assign_set(current, var, val)
 
+    def components(self, cids: FrozenSet[int]) -> List[FrozenSet[int]]:
+        clause_list = list(cids)
+        parent = list(range(len(clause_list)))
 
-def _components_fd(clauses: FrozenSet[FDClause]) -> List[FrozenSet[FDClause]]:
-    clause_list = list(clauses)
-    parent = list(range(len(clause_list)))
+        def find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
 
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
+        var_to_idx: Dict[int, int] = {}
+        for idx, cid in enumerate(clause_list):
+            for var in self.cvars[cid]:
+                if var in var_to_idx:
+                    ri, rj = find(var_to_idx[var]), find(idx)
+                    if ri != rj:
+                        parent[rj] = ri
+                else:
+                    var_to_idx[var] = idx
+        groups: Dict[int, List[int]] = {}
+        for idx, cid in enumerate(clause_list):
+            groups.setdefault(find(idx), []).append(cid)
+        return [frozenset(g) for g in groups.values()]
 
-    var_to_clause: Dict[int, int] = {}
-    for idx, clause in enumerate(clause_list):
-        for var, _ in clause:
-            if var in var_to_clause:
-                ri, rj = find(var_to_clause[var]), find(idx)
-                if ri != rj:
-                    parent[rj] = ri
-            else:
-                var_to_clause[var] = idx
-    groups: Dict[int, List[FDClause]] = {}
-    for idx, clause in enumerate(clause_list):
-        groups.setdefault(find(idx), []).append(clause)
-    return [frozenset(g) for g in groups.values()]
+    def pick_var(self, cids: FrozenSet[int]) -> int:
+        if self.var_order is not None:
+            present = set()
+            for cid in cids:
+                present |= self.cvars[cid]
+            for v in self.var_order:
+                if v in present:
+                    return v
+        counts: Counter = Counter()
+        for cid in cids:
+            counts.update(self.cvars[cid])
+        return min(counts, key=lambda v: (-counts[v], v))
 
-
-def _pick_var_fd(
-    clauses: FrozenSet[FDClause], order: Optional[Sequence[int]]
-) -> int:
-    present = {var for clause in clauses for var, _ in clause}
-    if order is not None:
-        for v in order:
-            if v in present:
-                return v
-    counts = Counter(var for clause in clauses for var, _ in clause)
-    return min(counts, key=lambda v: (-counts[v], v))
+    def solve(self, cids: FrozenSet[int]) -> int:
+        node = self.memo.get(cids)
+        if node is not None:
+            return node
+        b = self.builder
+        assigned, residual = self.bcp(cids)
+        if assigned is None:
+            node = b.false()
+        else:
+            parts = [
+                b.leaf(var, val) for var, val in sorted(assigned.items())
+            ]
+            for comp in self.components(residual):
+                comp_node = self.memo.get(comp)
+                if comp_node is None:
+                    var = self.pick_var(comp)
+                    branches = [
+                        b.and_(
+                            [
+                                b.leaf(var, val),
+                                self.solve(self.assign_set(comp, var, val)),
+                            ]
+                        )
+                        for val in range(self.spec.sizes[var])
+                    ]
+                    comp_node = b.or_(branches)
+                    self.memo[comp] = comp_node
+                parts.append(comp_node)
+            node = b.and_(parts)
+        self.memo[cids] = node
+        return node
 
 
 def compile_fd(
@@ -477,50 +546,19 @@ def compile_fd(
     elif var_order is None and heuristic != "dynamic":
         raise ValueError(f"unknown heuristic {heuristic!r}")
     spec = cnf.spec
-    builder = FDBuilder(spec)
     if any(clause == () for clause in cnf.clauses):
-        return builder.finish(builder.false())
+        b = FDBuilder(spec)
+        return b.finish(b.false())
+    comp = _FDCompiler(cnf, var_order)
     old_limit = sys.getrecursionlimit()
     sys.setrecursionlimit(max(old_limit, 10000 + 50 * spec.num_vars))
     try:
-        memo: Dict[FrozenSet[FDClause], int] = {}
-
-        def solve(clauses: FrozenSet[FDClause]) -> int:
-            cached = memo.get(clauses)
-            if cached is not None:
-                return cached
-            assigned, residual = _bcp_fd(clauses)
-            if assigned is None:
-                node = builder.false()
-            else:
-                parts = [
-                    builder.leaf(var, val)
-                    for var, val in sorted(assigned.items())
-                ]
-                for comp in _components_fd(residual):
-                    comp_node = memo.get(comp)
-                    if comp_node is None:
-                        var = _pick_var_fd(comp, var_order)
-                        branches = [
-                            builder.and_(
-                                [
-                                    builder.leaf(var, val),
-                                    solve(_assign(comp, var, val)),
-                                ]
-                            )
-                            for val in range(spec.sizes[var])
-                        ]
-                        comp_node = builder.or_(branches)
-                        memo[comp] = comp_node
-                    parts.append(comp_node)
-                node = builder.and_(parts)
-            memo[clauses] = node
-            return node
-
-        root = solve(frozenset(cnf.clauses))
+        root = comp.solve(
+            frozenset(comp.intern(c) for c in cnf.clauses)
+        )
     finally:
         sys.setrecursionlimit(old_limit)
-    circuit = builder.finish(root)
+    circuit = comp.builder.finish(root)
     if smooth:
         circuit = circuit.smooth()
     return circuit

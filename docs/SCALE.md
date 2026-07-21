@@ -37,15 +37,18 @@ nontrivial diagnostic reasoning falling out of exact inference.
    chain-decomposable structure. The compiled artifacts are *small*;
    there is no representational wall in sight for models of this shape.
 2. **Compile time is the wall, and it is mechanics, not math.** Process
-   lines: 1.3s at 40 stages, 6.4s at 80, 39.6s at 120 — superlinear
-   time against perfectly linear circuit growth. The blowup is the
-   pure-Python engine (frozenset clause-set hashing at every search
-   node, no watched literals), not the algorithm. This confirms the
-   "cheaper mechanics" roadmap item as the top scaling priority, and
-   puts a number on today's practical envelope: **~100 components /
-   ~2000 FD variables per compile at interactive-offline patience.**
-   (Compile is offline and once-per-model; queries stay sub-second up
-   to ~5k nodes.)
+   lines initially took 1.3s at 40 stages, 6.4s at 80, 39.6s at 120 —
+   superlinear time against perfectly linear circuit growth, i.e. the
+   pure-Python engine, not the algorithm. **Update — the interning pass
+   confirmed this:** interning clauses to integer ids (residual states
+   as frozensets of ints, per-clause conditioning memoized globally,
+   untouched clauses keep their id) gave identical circuits 4.5–6×
+   faster: adder k=32 in 0.77s, process-120 in 6.4s, process-200 (400
+   mode variables, 9.2k nodes) in 31s. Today's envelope: **~200
+   components per compile at offline patience, sub-second queries to
+   ~5k nodes.** Remaining superlinearity is per-node residual-set
+   hashing and scanning; the next constant-factor rungs are clause-set
+   hashing by id-set hash caching and watched-style unit detection.
 3. **The modes-first (marginal MAP) constraint is free on
    chain-structured models and catastrophic on gate networks.** On
    process lines the constrained circuit is *identical in size* to the
