@@ -177,3 +177,104 @@ class PriorLearner:
                 self.system._costs[mvlit] = (
                     math.inf if w <= 0 else -math.log(w)
                 )
+
+
+class ObservationTrainer:
+    """Train a neural observation model end-to-end through the circuit.
+
+    The network maps raw sensor input to per-value log-likelihoods for
+    the named observables (Pearl virtual evidence); the training signal
+    is the log-WMC of that soft evidence under the compiled model — so
+    the detectors learn from telemetry plus the logical structure, with
+    **no labels for the observables themselves**.
+
+    The network's output width must be ``sum(len(var.values) for the
+    named observables)``, in name order, each block in the variable's
+    value order.
+    """
+
+    def __init__(self, system, names, device="cpu",
+                 dtype=torch.float64):
+        self.system = system
+        self.names = list(names)
+        self.tc = TorchCircuit(system.circuit, semiring="logprob",
+                               device=device, dtype=dtype)
+        self.device = torch.device(device)
+        self.dtype = dtype
+        spec = system.circuit.spec
+        self.base = torch.tensor(
+            [-math.inf if w <= 0 else math.log(w)
+             for w in system._weights],
+            dtype=dtype, device=self.device,
+        )
+        slots = []
+        self.blocks = []
+        for name in self.names:
+            var = system.vars[name]
+            start = len(slots)
+            slots.extend(
+                spec.mvlit(var.fd_var, i) for i in range(len(var.values))
+            )
+            self.blocks.append((start, len(slots)))
+        self.slots = torch.tensor(slots, dtype=torch.long,
+                                  device=self.device)
+        self.width = len(slots)
+
+    def log_likelihood(self, local: torch.Tensor,
+                       masks: "torch.Tensor" = None) -> torch.Tensor:
+        """Per-row log-WMC given (B, width) local log-likelihoods.
+
+        Each observable's block is log-softmax-normalized first: virtual
+        evidence is only defined up to scale, and without normalization
+        the likelihood is unbounded (the network could inflate every
+        value's likelihood at once)."""
+        local = torch.cat(
+            [
+                torch.log_softmax(local[:, a:b], dim=1)
+                for a, b in self.blocks
+            ],
+            dim=1,
+        )
+        B = local.shape[0]
+        pad = torch.zeros(B, self.base.shape[0], dtype=self.dtype,
+                          device=self.device)
+        pad = pad.index_add(1, self.slots, local)
+        w = self.base.unsqueeze(0) + pad
+        if masks is not None:
+            w = w + masks
+        return self.tc(w)
+
+    def masks_for(self, observations) -> torch.Tensor:
+        """Hard-evidence masks (B, total): -inf on ruled-out values.
+        This is the grounding signal — soft neural evidence alone is
+        degenerate (reporting the a-priori likely value is optimal);
+        hard evidence elsewhere in the structure is what forces the
+        detectors to track their inputs."""
+        spec = self.system.circuit.spec
+        rows = torch.zeros(len(observations), spec.total,
+                           dtype=self.dtype, device=self.device)
+        for r, obs in enumerate(observations):
+            for name, value in obs.items():
+                var = self.system.vars[name]
+                chosen = self.system._value_index(name, value)
+                for i in range(len(var.values)):
+                    if i != chosen:
+                        rows[r, spec.mvlit(var.fd_var, i)] = -math.inf
+        return rows
+
+    def fit(self, net: "torch.nn.Module", inputs: torch.Tensor,
+            masks: "torch.Tensor" = None,
+            epochs: int = 200, lr: float = 0.01):
+        """Maximize mean log-WMC of ``net(inputs)`` combined with the
+        per-row hard-evidence ``masks``; returns the log-lik trace."""
+        opt = torch.optim.Adam(net.parameters(), lr=lr)
+        history = []
+        for _ in range(epochs):
+            opt.zero_grad()
+            loss = -self.log_likelihood(
+                net(inputs).to(self.dtype), masks
+            ).mean()
+            loss.backward()
+            opt.step()
+            history.append(-loss.item())
+        return history

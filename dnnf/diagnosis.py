@@ -318,11 +318,35 @@ class CompiledSystem:
                     weights[spec.mvlit(var.fd_var, i)] = dist.get(value, 0.0)
         for name, value in evidence.items():
             var = self.vars[name]
+            lik = self._soft_likelihoods(var, value)
+            if lik is not None:
+                for i, l in enumerate(lik):
+                    weights[spec.mvlit(var.fd_var, i)] *= l
+                continue
             chosen = self._value_index(name, value)
             for i in range(len(var.values)):
                 if i != chosen:
                     weights[spec.mvlit(var.fd_var, i)] = 0.0
         return [-math.inf if w <= 0 else math.log(w) for w in weights]
+
+    @staticmethod
+    def _soft_likelihoods(var: FiniteVar, value) -> Optional[List[float]]:
+        """Soft (virtual) evidence: an observation may be a per-value
+        likelihood vector instead of a hard value — ``(0.9, 0.1)`` (in
+        the variable's value order) or ``{value: likelihood}``.  These
+        are Pearl virtual-evidence likelihoods ``P(reading | var=v)``,
+        multiplied into the value weights; they need not sum to 1 (only
+        ratios matter)."""
+        if isinstance(value, dict):
+            return [float(value.get(v, 0.0)) for v in var.values]
+        if isinstance(value, (tuple, list)):
+            if len(value) != len(var.values):
+                raise ValueError(
+                    f"likelihood vector for {var.name} needs "
+                    f"{len(var.values)} entries"
+                )
+            return [float(x) for x in value]
+        return None
 
     def _conditioned_costs(
         self, evidence: Dict[str, EvidenceValue]
@@ -331,6 +355,13 @@ class CompiledSystem:
         spec = self.circuit.spec
         for name, value in evidence.items():
             var = self.vars[name]
+            lik = self._soft_likelihoods(var, value)
+            if lik is not None:
+                for i, l in enumerate(lik):
+                    costs[spec.mvlit(var.fd_var, i)] += (
+                        math.inf if l <= 0 else -math.log(l)
+                    )
+                continue
             chosen = self._value_index(name, value)
             for i in range(len(var.values)):
                 if i != chosen:
