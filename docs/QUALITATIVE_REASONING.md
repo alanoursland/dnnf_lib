@@ -105,12 +105,37 @@ historically computed by generate-and-test search come almost for free:
   reduce it — it just represents it compactly and lets weights rank it.
   That's an honest improvement, not magic.
 
-## Cheapest experiment
+## The experiment — done, and it worked
 
-Model the classic QR textbook system — two cascaded tanks with a
-qualitative flow law (`outflow M+ level`) — as quantized variables plus
-direction-of-change variables, compile, and check that the circuit's
-model set reproduces the known envisionment from the literature. That's
-an afternoon with the existing API (`quantized`, FD constraints,
-`enumerate_models`), and it would make a crisp demo: *QSIM's state graph,
-as a database you can query and weight.*
+The classic QR textbook system — two cascaded tanks with monotonic flow
+laws (`outflow = M+(level)`), quantity spaces `{zero, between, full}`,
+direction-of-change variables `{dec, std, inc}`, sign-algebra derivative
+constraints, and landmark consistency rules — is modeled in
+`examples/cascaded_tanks.py` and verified in `tests/test_qsim_tanks.py`.
+
+Results (all checked against hand-enumeration of the qualitative rules):
+
+- The one-slice envisionment compiles to a **62-node circuit** whose
+  model set is exactly the expected state space: **33** consistent
+  states with inflow on, **15** with inflow off, **48** with inflow
+  free. Counting each is one sweep.
+- The unique quiescent state under no inflow (both tanks empty, both
+  directions `std`) falls out as the single model consistent with
+  `dA=std, dB=std` — the compiled circuit "knows" the global
+  equilibrium.
+- Filtering works as filtering should: "tank B rising" narrows 33
+  states to 10; the design-safety query "tank B full *and* still
+  rising" is provably impossible (`log P = -inf`) by landmark
+  consistency alone.
+- With mild plausibility priors on qualitative values, QSIM's ambiguity
+  explosion becomes a **ranked posterior over qualitative states**
+  (`map_diagnoses`): under "faucet on, B rising," the four plausible
+  mid-range states come back ordered with exact probabilities, ambiguity
+  quantified instead of enumerated.
+
+So the thesis holds at textbook scale: *QSIM's state graph as a
+queryable, weightable database*, with the ambiguity ranked rather than
+exploding. The open frontier is unchanged: behaviors over time need the
+compiled transition-relation machinery (QSIM continuity rules as joint
+constraints between consecutive slices), which is also what the tracking
+layer needs next.
