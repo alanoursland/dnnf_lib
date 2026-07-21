@@ -595,6 +595,98 @@ class CompiledSystem:
             raise ValueError("model has zero total mass")
         return self._decode_state(assignment)
 
+    def diagnoses_min_cardinality(
+        self, evidence: Dict[str, EvidenceValue], k: int = 5
+    ) -> List[Tuple[int, Dict[str, str]]]:
+        """The ``k`` mode assignments with fewest faults consistent with
+        the evidence, fewest first: ``(fault_count, modes)``.  A fault is
+        any mode value other than the variable's nominal (highest-prior)
+        value.  Classic minimum-cardinality diagnosis via the tropical
+        semiring with unit fault costs."""
+        spec = self.circuit.spec
+        costs = [0.0] * spec.total
+        nominal: Dict[str, int] = {}
+        for name in self.mode_vars:
+            var = self.vars[name]
+            weights = [
+                self._weights[spec.mvlit(var.fd_var, i)]
+                for i in range(len(var.values))
+            ]
+            nom = max(range(len(var.values)), key=lambda i: weights[i])
+            nominal[name] = nom
+            for i in range(len(var.values)):
+                if i != nom:
+                    costs[spec.mvlit(var.fd_var, i)] = 1.0
+        for name, value in evidence.items():
+            var = self.vars[name]
+            lik = self._soft_likelihoods(var, value)
+            chosen = None if lik is not None else self._value_index(name, value)
+            for i in range(len(var.values)):
+                if lik is not None:
+                    if lik[i] <= 0:
+                        costs[spec.mvlit(var.fd_var, i)] = math.inf
+                elif i != chosen:
+                    costs[spec.mvlit(var.fd_var, i)] = math.inf
+        out: List[Tuple[int, Dict[str, str]]] = []
+        seen: set = set()
+        for cost, assignment in fd.enumerate_models(self.circuit, costs):
+            modes = {
+                name: self.vars[name].values[assignment[self.vars[name].fd_var]]
+                for name in self.mode_vars
+            }
+            key = tuple(sorted(modes.items()))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((round(cost), modes))
+            if len(out) >= k:
+                break
+        return out
+
+    def value_of_information(
+        self,
+        evidence: Dict[str, EvidenceValue],
+        candidates: Optional[Sequence[str]] = None,
+    ) -> List[Tuple[str, float]]:
+        """Rank unobserved variables by expected reduction in diagnosis
+        uncertainty: for each candidate ``c``, ``VOI(c) = H(modes | e) -
+        E_{v ~ P(c|e)}[H(modes | e, c=v)]`` where H is the sum of
+        per-mode-variable marginal entropies (an upper bound on joint
+        entropy; exact for a single mode variable).  Returns
+        ``[(name, voi), ...]`` best first — "which sensor should I read
+        next."  Candidates default to all unobserved non-hidden,
+        non-mode variables."""
+        if candidates is None:
+            candidates = [
+                n for n in self.vars
+                if n not in evidence and not n.startswith("_")
+                and n not in self.mode_vars and "@prev" not in n
+            ]
+
+        def entropy(ev) -> float:
+            h = 0.0
+            for name in self.mode_vars:
+                for p in self.posteriors(ev, names=[name])[name].values():
+                    if p > 0:
+                        h -= p * math.log(p)
+            return h
+
+        h0 = entropy(evidence)
+        out: List[Tuple[str, float]] = []
+        for c in candidates:
+            var = self.vars[c]
+            dist = self.posteriors(evidence, names=[c])[c]
+            expected = 0.0
+            for value, p in dist.items():
+                if p <= 0:
+                    continue
+                ev = dict(evidence)
+                ev[c] = value
+                expected += p * entropy(ev)
+            out.append((c, h0 - expected))
+        out.sort(key=lambda nv: -nv[1])
+        return out
+
     # -- decoding -------------------------------------------------------
     def _decode_state(
         self, assignment: Dict[int, int]

@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use dnnf_lib, please cite it."
+title: "dnnf_lib: compiled DNNF reasoning, diagnosis, and learning"
+authors:
+  - family-names: Oursland
+    given-names: Alan
+year: 2026
+url: "https://github.com/alanoursland/dnnf_lib"
+license: MIT
