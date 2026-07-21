@@ -57,6 +57,15 @@ class ModeTracker:
         ``{mode_var: {from_value: {to_value: prob}}}``.  Mode variables
         without an entry are *resampled from their static priors* each
         step (i.e. treated as memoryless).  Rows should sum to 1.
+    transition_fn:
+        Optional callable ``prev_modes -> {mode_var: {value: prob}}``
+        giving each variable's next-value distribution as a function of
+        the **entire** previous joint mode assignment — this is how
+        correlated dynamics are expressed (e.g. a pump failure raising
+        the valve's failure rate).  Variables missing from its result
+        fall back to ``transitions`` (then to static priors).  A per-step
+        ``transitions`` override passed to :meth:`step` takes precedence
+        over both.
     beam:
         Maximum number of mode assignments kept in the belief.
     expand:
@@ -67,13 +76,16 @@ class ModeTracker:
     def __init__(
         self,
         system: CompiledSystem,
-        transitions: Transitions,
+        transitions: Optional[Transitions] = None,
         beam: int = 10,
         expand: Optional[int] = None,
+        transition_fn=None,
     ):
         self.system = system
         self.beam = beam
         self.expand = expand or beam
+        self.transition_fn = transition_fn
+        transitions = transitions or {}
         for name, matrix in transitions.items():
             fv = system.finites[name]
             for from_value, row in matrix.items():
@@ -123,6 +135,11 @@ class ModeTracker:
                 name: matrix[prev[name]]
                 for name, matrix in step_transitions.items()
             }
+            if self.transition_fn is not None:
+                correlated = self.transition_fn(prev)
+                for name, dist in correlated.items():
+                    if transitions is None or name not in transitions:
+                        mode_priors[name] = dist
             log_w = self.system.log_weights_for(evidence, mode_priors)
             for cost, modes in self.system.ranked_map(log_w, self.expand):
                 key = tuple(sorted(modes.items()))

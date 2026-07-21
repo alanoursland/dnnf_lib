@@ -134,10 +134,11 @@ diagnosis: the compiled circuit is an exact, differentiable likelihood.
   learns value priors from partially observed telemetry by exact EM
   (posterior WMC ratios as the E-step), verified to recover known failure
   rates from alarm-only observations; `sample_state()` provides exact
-  model sampling for simulation and synthetic data. Remaining: the
-  gradient path — leaf weights as `nn.Parameter`, minibatch SGD on the
-  torch backend for large telemetry sets and coupled/conditional
-  parameterizations that EM's independent-categorical M-step can't fit.
+  model sampling for simulation and synthetic data. ✅ *Gradient path
+  done too:* `dnnf.torch_learn.PriorLearner` /
+  `CompiledSystem.fit_priors_torch` train the same priors by Adam on the
+  differentiable backend (batched masked log-WMC over deduplicated
+  evidence patterns), verified to match EM and the analytic MLE.
   Result: failure priors estimated from fleet data instead of engineering
   guesses, with the logical model as a hard constraint.
 - **Neural observation models.** Raw sensor streams rarely arrive as clean
@@ -158,8 +159,12 @@ diagnosis: the compiled circuit is an exact, differentiable likelihood.
   `dnnf.ModeTracker` maintains a beam-filtered belief over joint mode
   assignments with per-variable transition matrices, exact HMM filtering
   when the beam covers the mode space (verified against a hand-rolled
-  forward recursion). Remaining: compiled transition *relations* (joint
-  constraints between consecutive modes, e.g. "cannot go dead to ok"),
+  forward recursion). Zero-probability transitions, per-step
+  (command-conditioned) overrides, and `transition_fn` — each variable's
+  next-value distribution as a function of the entire previous joint
+  assignment, for correlated dynamics — are supported and verified
+  against an exact joint forward filter. Remaining: compiled transition
+  *relations* (hard joint constraints between consecutive slices),
   fixed-lag smoothing via k-step unrolling, ranked fault *trajectories*
   (k-best over paths, not just states), and running the per-step sweeps
   on the GPU backend.

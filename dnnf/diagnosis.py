@@ -505,6 +505,25 @@ class CompiledSystem:
                 break
         return history
 
+    def fit_priors_torch(
+        self,
+        observations: Sequence[Dict[str, EvidenceValue]],
+        names: Optional[Sequence[str]] = None,
+        epochs: int = 300,
+        lr: float = 0.05,
+        device: str = "cpu",
+    ) -> List[float]:
+        """Gradient-based alternative to :meth:`fit_priors`: trains the
+        same priors by Adam on the differentiable torch backend (batched
+        masked log-WMC), writes them back, and returns the average
+        log-likelihood trace.  Scales to large telemetry sets and GPU;
+        requires torch."""
+        from .torch_learn import PriorLearner
+
+        return PriorLearner(self, names=names, device=device).fit(
+            observations, epochs=epochs, lr=lr
+        )
+
     def sample_state(self, rng) -> Dict[str, EvidenceValue]:
         """Draw one complete system state from the model's current
         weighted distribution (priors + constraints).  Useful for
