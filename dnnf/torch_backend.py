@@ -125,9 +125,50 @@ class TorchCircuit:
             const_vals, dtype=self.dtype, device=self.device
         )
 
-        # Internal layers: per depth, edge lists for AND and OR segments.
+        # Internal layers.  Children are addressed as (source layer,
+        # offset within that layer's output) and grouped by source layer,
+        # so each layer's gather is a handful of edge-sized index_selects
+        # on earlier layer outputs — no whole-prefix concatenation.
+        # Segment reductions are order-independent, so segment ids are
+        # simply stored in grouped order.
         max_depth = max(depth) if n else 0
-        self.layers: List[Dict[str, torch.Tensor | int]] = []
+        layer_sizes = [self.num_leaves] + [
+            sum(1 for old in order if depth[old] == d)
+            for d in range(1, max_depth + 1)
+        ]
+        starts = [0]
+        for s in layer_sizes:
+            starts.append(starts[-1] + s)
+        pos_layer = [0] * n
+        pos_offset = [0] * n
+        for pos in range(n):
+            for li in range(len(layer_sizes)):
+                if pos < starts[li + 1]:
+                    pos_layer[pos] = li
+                    pos_offset[pos] = pos - starts[li]
+                    break
+        self.root_layer = pos_layer[self.root_pos]
+        self.root_offset = pos_offset[self.root_pos]
+
+        def make_groups(children: List[int], segs: List[int]):
+            by_src: Dict[int, List[int]] = {}
+            seg_grouped: List[int] = []
+            for c in children:
+                by_src.setdefault(pos_layer[c], []).append(pos_offset[c])
+            for c, s in sorted(
+                zip(children, segs), key=lambda cs: pos_layer[cs[0]]
+            ):
+                seg_grouped.append(s)
+            groups = [
+                (src, torch.tensor(idx, dtype=torch.long, device=self.device))
+                for src, idx in sorted(by_src.items())
+            ]
+            seg_t = torch.tensor(
+                seg_grouped, dtype=torch.long, device=self.device
+            )
+            return groups, seg_t
+
+        self.layers: List[Dict] = []
         for d in range(1, max_depth + 1):
             nodes = [old for old in order if depth[old] == d]
             and_child: List[int] = []
@@ -146,13 +187,14 @@ class TorchCircuit:
                     or_child.extend(kids)
                     or_seg.extend([n_or] * len(kids))
                     n_or += 1
-            t = lambda x: torch.tensor(x, dtype=torch.long, device=self.device)
+            and_groups, and_seg_t = make_groups(and_child, and_seg)
+            or_groups, or_seg_t = make_groups(or_child, or_seg)
             self.layers.append(
                 {
-                    "and_child": t(and_child),
-                    "and_seg": t(and_seg),
-                    "or_child": t(or_child),
-                    "or_seg": t(or_seg),
+                    "and_groups": and_groups,
+                    "and_seg": and_seg_t,
+                    "or_groups": or_groups,
+                    "or_seg": or_seg_t,
                     "n_and": n_and,
                     "n_or": n_or,
                 }
@@ -207,62 +249,38 @@ class TorchCircuit:
         if weights.dim() == 1:
             weights = weights.unsqueeze(0)
         B = weights.shape[0]
-        needs_grad = weights.requires_grad and torch.is_grad_enabled()
 
         lit_vals = weights.index_select(1, self.leaf_lit_idx)
         consts = self.const_vals.unsqueeze(0).expand(B, -1)
+        outs: List[torch.Tensor] = [torch.cat([lit_vals, consts], dim=1)]
 
-        if not needs_grad:
-            # Fast path: write layers into one preallocated buffer.  Layer
-            # outputs occupy contiguous slices because nodes are numbered
-            # by (depth, AND-before-OR).
-            total = self.num_leaves + sum(
-                layer["n_and"] + layer["n_or"] for layer in self.layers
-            )
-            acc = torch.empty(B, total, dtype=self.dtype, device=weights.device)
-            acc[:, : lit_vals.shape[1]] = lit_vals
-            acc[:, lit_vals.shape[1] : self.num_leaves] = consts
-            offset = self.num_leaves
-            for layer in self.layers:
-                if layer["n_and"]:
-                    gathered = acc.index_select(1, layer["and_child"])
-                    seg2 = layer["and_seg"].unsqueeze(0).expand(B, -1)
-                    s = torch.zeros(
-                        B, layer["n_and"], dtype=self.dtype, device=acc.device
-                    )
-                    s.scatter_add_(1, seg2, gathered)
-                    acc[:, offset : offset + layer["n_and"]] = s
-                    offset += layer["n_and"]
-                if layer["n_or"]:
-                    gathered = acc.index_select(1, layer["or_child"])
-                    acc[:, offset : offset + layer["n_or"]] = self._segment_or(
-                        gathered, layer["or_seg"], layer["n_or"]
-                    )
-                    offset += layer["n_or"]
-            if return_all:
-                return acc
-            return acc[:, self.root_pos]
+        def gather(groups) -> torch.Tensor:
+            parts = [
+                outs[src].index_select(1, idx) for src, idx in groups
+            ]
+            return parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
 
-        # Autograd path: functional (no in-place writes into the buffer).
-        acc = torch.cat([lit_vals, consts], dim=1)
         for layer in self.layers:
-            outs = []
+            pieces = []
             if layer["n_and"]:
-                gathered = acc.index_select(1, layer["and_child"])
+                gathered = gather(layer["and_groups"])
                 seg2 = layer["and_seg"].unsqueeze(0).expand(B, -1)
                 s = torch.zeros(
-                    B, layer["n_and"], dtype=self.dtype, device=acc.device
+                    B, layer["n_and"], dtype=self.dtype,
+                    device=weights.device,
                 )
-                outs.append(s.scatter_add(1, seg2, gathered))
+                pieces.append(s.scatter_add(1, seg2, gathered))
             if layer["n_or"]:
-                gathered = acc.index_select(1, layer["or_child"])
-                outs.append(
+                gathered = gather(layer["or_groups"])
+                pieces.append(
                     self._segment_or(gathered, layer["or_seg"], layer["n_or"])
                 )
-            acc = torch.cat([acc] + outs, dim=1)
+            outs.append(
+                pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=1)
+            )
         if return_all:
-            return acc
-        return acc[:, self.root_pos]
+            return torch.cat(outs, dim=1)
+        return outs[self.root_layer][:, self.root_offset]
 
     __call__ = forward
 
