@@ -1,78 +1,137 @@
-"""Model-based diagnosis on compiled DNNF circuits.
+"""Model-based diagnosis on natively multi-valued compiled circuits.
 
-This layer mirrors the architecture of the JPL DNNF diagnosis engines: a
-system is described as components with discrete *modes* (carrying prior
-probabilities) plus *observables*, connected by propositional constraints.
-The description is encoded to CNF, compiled once (offline) to a smooth
-d-DNNF, and then queried online:
+A system is described as components with discrete *modes* (carrying prior
+probabilities), *observables* (boolean, finite-domain, or quantized
+continuous), and propositional constraints.  The description is compiled
+once (offline) to a smooth finite-domain d-DNNF — leaves are atomic
+assignments like ``valve=stuck_closed`` — and then queried online:
 
-* :meth:`CompiledSystem.diagnoses` — the k most probable complete system
-  states consistent with the observations, projected onto mode variables
-  and ordered from most to least probable (best-first enumeration over the
-  circuit with neg-log-probability leaf weights);
-* :meth:`CompiledSystem.mode_posteriors` — exact posterior marginals
-  ``P(mode = value | evidence)`` via weighted-model-count ratios;
+* :meth:`CompiledSystem.diagnoses` — ranked complete system states (MPE
+  semantics), most probable first;
+* :meth:`CompiledSystem.map_diagnoses` — ranked joint mode assignments by
+  **exact summed posterior** (marginal MAP);
+* :meth:`CompiledSystem.mode_posteriors` — exact per-mode marginals;
 * :meth:`CompiledSystem.log_evidence` — ``log P(evidence)``.
 
-Priors: mode values are one-hot encoded with exactly-one constraints; the
-positive literal of value ``m`` gets weight ``P(m)`` (cost ``-log P(m)``)
-and every other literal weight 1 (cost 0), the standard literal-weighted
-WMC encoding of discrete priors.  Boolean observables default to an
-uninformative weight of 1 per polarity, which cancels in every posterior
-ratio.  Tseitin auxiliaries are weight-neutral and functionally determined,
-so they affect nothing.
+Weights live directly on ``(variable, value)`` leaves: a mode's prior is
+the weight of its value, evidence masks the weights of ruled-out values,
+and Tseitin auxiliaries are neutral.  There is no one-hot encoding and no
+exactly-one clauses — finite domains are native (see :mod:`dnnf.fd`).
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple, Union
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
-from . import eval as _eval
-from .circuit import Circuit, lit_index
-from .cnf import CNF
-from .compiler import compile_cnf
-from .formula import Formula, Prop, encode, exactly_one
-from .kbest import enumerate_models
+from . import fd
+from .fd import FDAtom, FDCircuit, FDCnf
+from .formula import Formula, Not, iff
 
-EvidenceValue = Union[bool, str]
+EvidenceValue = Union[bool, str, int, float]
 
 
 class FiniteVar:
-    """A finite-domain variable, one-hot encoded over propositional vars."""
+    """A named finite-domain variable; ``var == value`` yields an atom."""
 
-    def __init__(self, name: str, values: Sequence[str], var_ids: Sequence[int]):
+    def __init__(self, name: str, values: Sequence, fd_var: int):
         self.name = name
         self.values = tuple(values)
-        self.var_ids = tuple(var_ids)
-        self._props = {
-            v: Prop(i, f"{name}={v}") for v, i in zip(values, var_ids)
-        }
+        self.fd_var = fd_var
 
-    def __eq__(self, value: str) -> Formula:  # type: ignore[override]
-        if value not in self._props:
-            raise KeyError(f"{self.name} has no value {value!r}")
-        return self._props[value]
+    def _index(self, value) -> int:
+        try:
+            return self.values.index(value)
+        except ValueError:
+            raise KeyError(f"{self.name} has no value {value!r}") from None
 
-    def __ne__(self, value: str) -> Formula:  # type: ignore[override]
-        return ~(self == value)
+    def __eq__(self, value) -> Formula:  # type: ignore[override]
+        return FDAtom(
+            self.fd_var, frozenset((self._index(value),)),
+            f"{self.name}={value}",
+        )
+
+    def __ne__(self, value) -> Formula:  # type: ignore[override]
+        idx = self._index(value)
+        rest = frozenset(range(len(self.values))) - {idx}
+        return FDAtom(self.fd_var, rest, f"{self.name}!={value}")
+
+    def in_(self, values) -> Formula:
+        """Atom: this variable's value is one of ``values``."""
+        idxs = frozenset(self._index(v) for v in values)
+        return FDAtom(self.fd_var, idxs, f"{self.name}in{list(values)}")
 
     def __hash__(self):
-        return hash((self.name, self.values, self.var_ids))
+        return hash((self.name, self.fd_var))
 
-    def props(self) -> List[Prop]:
-        return [self._props[v] for v in self.values]
+
+class QuantizedVar(FiniteVar):
+    """A continuous quantity quantized into bounded intervals.
+
+    ``boundaries = [b0, b1, ..., bn]`` defines n buckets ``[b_i, b_{i+1})``;
+    threshold atoms (:meth:`below`, :meth:`at_least`, :meth:`between`) are
+    single set-literals over bucket indices, and numeric evidence is
+    bucketed automatically.
+    """
+
+    def __init__(self, name: str, boundaries: Sequence[float], fd_var: int):
+        bs = list(boundaries)
+        if len(bs) < 3 or any(a >= b for a, b in zip(bs, bs[1:])):
+            raise ValueError(
+                "boundaries must be strictly increasing with >= 2 buckets"
+            )
+        labels = [f"[{a},{b})" for a, b in zip(bs, bs[1:])]
+        super().__init__(name, labels, fd_var)
+        self.boundaries = bs
+
+    def _boundary_index(self, x: float) -> int:
+        try:
+            return self.boundaries.index(x)
+        except ValueError:
+            raise ValueError(
+                f"{x} is not a quantization boundary of {self.name}; "
+                f"boundaries are {self.boundaries}"
+            ) from None
+
+    def below(self, x: float) -> Formula:
+        """Atom: value < x (x must be a boundary)."""
+        j = self._boundary_index(x)
+        return FDAtom(self.fd_var, frozenset(range(j)), f"{self.name}<{x}")
+
+    def at_least(self, x: float) -> Formula:
+        j = self._boundary_index(x)
+        return FDAtom(
+            self.fd_var,
+            frozenset(range(j, len(self.values))),
+            f"{self.name}>={x}",
+        )
+
+    def between(self, lo: float, hi: float) -> Formula:
+        """Atom: lo <= value < hi (both boundaries)."""
+        i, j = self._boundary_index(lo), self._boundary_index(hi)
+        return FDAtom(
+            self.fd_var, frozenset(range(i, j)), f"{lo}<={self.name}<{hi}"
+        )
+
+    def bucket_of(self, x: float) -> int:
+        for i in range(len(self.boundaries) - 1):
+            if self.boundaries[i] <= x < self.boundaries[i + 1]:
+                return i
+        raise ValueError(
+            f"{x} outside the quantized range "
+            f"[{self.boundaries[0]}, {self.boundaries[-1]}) of {self.name}"
+        )
 
 
 @dataclass
 class Diagnosis:
-    """One ranked system state."""
+    """One ranked explanation."""
 
     modes: Dict[str, str]
     state: Dict[str, EvidenceValue]
-    cost: float  # neg-log joint probability (up to observable weighting)
-    posterior: float  # normalized P(state | evidence)
+    cost: float  # neg-log (unnormalized) mass
+    posterior: float  # normalized P(. | evidence)
 
     def __repr__(self) -> str:  # pragma: no cover
         modes = ", ".join(f"{k}={v}" for k, v in sorted(self.modes.items()))
@@ -80,66 +139,86 @@ class Diagnosis:
 
 
 class SystemModel:
-    """Declarative system description: modes, observables, constraints."""
+    """Declarative system description over native finite domains."""
 
     def __init__(self) -> None:
-        self.cnf = CNF()
+        self.cnf = FDCnf()
         self._constraints: List[Formula] = []
-        self._bools: Dict[str, Prop] = {}
-        self._finites: Dict[str, FiniteVar] = {}
-        # var -> (positive-literal weight, negative-literal weight)
-        self._priors: Dict[int, Tuple[float, float]] = {}
+        self.vars: Dict[str, FiniteVar] = {}
+        # mvlit -> weight (only non-default entries stored)
+        self._prior_weights: Dict[int, float] = {}
         self._mode_vars: List[str] = []
 
+    def _register(self, var: FiniteVar) -> FiniteVar:
+        if var.name in self.vars:
+            raise ValueError(f"duplicate variable {var.name!r}")
+        self.vars[var.name] = var
+        return var
+
     # -- variable declaration ------------------------------------------
-    def bool(self, name: str, prior: Optional[float] = None) -> Prop:
-        """Declare a boolean variable.  ``prior`` (if given) is
-        ``P(name = True)``; omitted means uninformative weight 1/1."""
-        if name in self._bools or name in self._finites:
-            raise ValueError(f"duplicate variable {name!r}")
-        p = Prop(self.cnf.add_var(), name)
-        self._bools[name] = p
+    def bool(self, name: str, prior: Optional[float] = None) -> Formula:
+        """Declare a boolean variable; returns the atom "name is true".
+        ``prior`` (if given) is ``P(true)``; omitted means uninformative
+        weight 1 per polarity."""
+        fd_var = self.cnf.spec.add_var(2)
+        v = self._register(FiniteVar(name, (False, True), fd_var))
         if prior is not None:
-            self._priors[p.var] = (prior, 1.0 - prior)
-        return p
+            self._prior_weights[self.cnf.spec.mvlit(fd_var, 0)] = 1.0 - prior
+            self._prior_weights[self.cnf.spec.mvlit(fd_var, 1)] = prior
+        return v == True  # noqa: E712
 
     def finite(
         self,
         name: str,
-        values: Sequence[str],
+        values: Sequence,
         priors: Optional[Sequence[float]] = None,
         mode: bool = False,
     ) -> FiniteVar:
-        """Declare a finite-domain variable (one-hot + exactly-one).
-
-        With ``mode=True`` (or when ``priors`` are given) the variable is
-        treated as a component mode: it appears in diagnoses and its priors
-        weight the enumeration.
-        """
-        if name in self._bools or name in self._finites:
-            raise ValueError(f"duplicate variable {name!r}")
-        ids = [self.cnf.add_var() for _ in values]
-        fv = FiniteVar(name, values, ids)
-        self._finites[name] = fv
-        self._constraints.append(exactly_one(fv.props()))
+        """Declare a finite-domain variable.  With ``mode=True`` (or when
+        ``priors`` are given) it is a component mode: it appears in
+        diagnoses and its priors weight the enumeration."""
+        fd_var = self.cnf.spec.add_var(len(values))
+        v = self._register(FiniteVar(name, values, fd_var))
         if priors is not None:
             if len(priors) != len(values):
                 raise ValueError("priors length must match values")
             total = sum(priors)
-            for i, p in zip(ids, priors):
-                # One-hot encoding: prior mass on the positive literal,
-                # neutral weight on the negative (exactly-one constraints
-                # make the product over a component equal its chosen prior).
-                self._priors[i] = (p / total, 1.0)
+            for i, p in enumerate(priors):
+                self._prior_weights[self.cnf.spec.mvlit(fd_var, i)] = p / total
         if mode or priors is not None:
             self._mode_vars.append(name)
-        return fv
+        return v
 
     def mode(
-        self, name: str, values: Sequence[str], priors: Sequence[float]
+        self, name: str, values: Sequence, priors: Sequence[float]
     ) -> FiniteVar:
         """Shorthand for a component mode variable with priors."""
         return self.finite(name, values, priors=priors, mode=True)
+
+    def quantized(
+        self,
+        name: str,
+        boundaries: Sequence[float],
+        priors: Optional[Sequence[float]] = None,
+        mode: bool = False,
+    ) -> QuantizedVar:
+        """Declare a continuous quantity quantized into the bounded
+        intervals ``[b0,b1), [b1,b2), ...``.  Threshold atoms:
+        ``v.below(x)``, ``v.at_least(x)``, ``v.between(lo, hi)`` (x at
+        boundaries).  Evidence may be given as a raw number and is
+        bucketed automatically."""
+        fd_var = self.cnf.spec.add_var(len(boundaries) - 1)
+        v = QuantizedVar(name, boundaries, fd_var)
+        self._register(v)
+        if priors is not None:
+            if len(priors) != len(v.values):
+                raise ValueError("priors length must match bucket count")
+            total = sum(priors)
+            for i, p in enumerate(priors):
+                self._prior_weights[self.cnf.spec.mvlit(fd_var, i)] = p / total
+        if mode or priors is not None:
+            self._mode_vars.append(name)
+        return v
 
     def add(self, formula: Formula) -> None:
         self._constraints.append(formula)
@@ -150,17 +229,12 @@ class SystemModel:
         expr: Formula,
         false_positive: float = 0.0,
         false_negative: float = 0.0,
-    ) -> Prop:
-        """Declare an observable that noisily reports ``expr``.
-
-        ``P(name=True | expr) = 1 - false_negative`` and
-        ``P(name=True | ~expr) = false_positive``, implemented with hidden
-        fault-injection variables (named ``_<name>_fp`` / ``_<name>_fn``,
-        excluded from reported diagnosis states).  With both rates zero
-        this is just ``add(iff(name, expr))``.
-        """
-        from .formula import Not, iff
-
+    ) -> Formula:
+        """Declare an observable that noisily reports ``expr``:
+        ``P(name=True | expr) = 1 - false_negative``, ``P(name=True |
+        ~expr) = false_positive``.  Hidden fault-injection variables
+        (``_<name>_fp`` / ``_<name>_fn``) are excluded from reported
+        states."""
         s = self.bool(name)
         true_when: Formula = expr
         if false_negative > 0.0:
@@ -179,100 +253,95 @@ class SystemModel:
         var_order: Optional[Sequence[int]] = None,
         modes_first: bool = True,
     ) -> "CompiledSystem":
-        """Compile the system to a smooth d-DNNF.
-
-        With ``modes_first=True`` (default), mode variables are branched
-        before all others, which constrains the circuit so that
-        :meth:`CompiledSystem.map_diagnoses` — exact marginal MAP over
-        modes — is available.  Pass ``modes_first=False`` (or a custom
-        ``var_order``) to let the heuristic choose freely, possibly at the
-        price of losing that query.
-        """
-        num_original = self.cnf.num_vars
-        encode(self._constraints, self.cnf)
+        """Compile to a smooth finite-domain d-DNNF.  With ``modes_first``
+        (default) mode variables are branched above all others, enabling
+        exact marginal MAP (:meth:`CompiledSystem.map_diagnoses`)."""
+        fd.encode(self._constraints, self.cnf)
         if var_order is None and modes_first:
-            var_order = [
-                i for name in self._mode_vars
-                for i in self._finites[name].var_ids
-            ]
-        circuit = compile_cnf(self.cnf, var_order=var_order, smooth=True)
+            var_order = [self.vars[n].fd_var for n in self._mode_vars]
+        circuit = fd.compile_fd(self.cnf, var_order=var_order, smooth=True)
         return CompiledSystem(
             circuit=circuit,
-            bools=dict(self._bools),
-            finites=dict(self._finites),
-            priors=dict(self._priors),
+            variables=dict(self.vars),
+            prior_weights=dict(self._prior_weights),
             mode_vars=list(self._mode_vars),
-            num_original=num_original,
         )
 
 
 class CompiledSystem:
     def __init__(
         self,
-        circuit: Circuit,
-        bools: Dict[str, Prop],
-        finites: Dict[str, FiniteVar],
-        priors: Dict[int, Tuple[float, float]],
+        circuit: FDCircuit,
+        variables: Dict[str, FiniteVar],
+        prior_weights: Dict[int, float],
         mode_vars: List[str],
-        num_original: int,
     ):
         self.circuit = circuit
-        self.bools = bools
-        self.finites = finites
-        self.priors = priors
+        self.vars = variables
         self.mode_vars = mode_vars
-        self.num_original = num_original
-        n = circuit.num_vars
-        # Probability weights (for WMC) and neg-log costs (for MPE/k-best).
-        self._weights = [1.0] * (2 * n)
-        for var, (pos, neg) in priors.items():
-            self._weights[lit_index(var)] = pos
-            self._weights[lit_index(-var)] = neg
+        self._weights = [1.0] * circuit.spec.total
+        for mvlit, w in prior_weights.items():
+            self._weights[mvlit] = w
         self._costs = [
             0.0 if w == 1.0 else (math.inf if w <= 0 else -math.log(w))
             for w in self._weights
         ]
 
-    # -- evidence -------------------------------------------------------
-    def _evidence_assignment(
-        self, evidence: Dict[str, EvidenceValue]
-    ) -> Dict[int, bool]:
-        assign: Dict[int, bool] = {}
-        for name, value in evidence.items():
-            if name in self.bools:
-                if not isinstance(value, bool):
-                    raise TypeError(f"{name} is boolean; got {value!r}")
-                assign[self.bools[name].var] = value
-            elif name in self.finites:
-                fv = self.finites[name]
-                if value not in fv.values:
-                    raise KeyError(f"{name} has no value {value!r}")
-                for v, i in zip(fv.values, fv.var_ids):
-                    assign[i] = v == value
-            else:
-                raise KeyError(f"unknown variable {name!r}")
-        return assign
+    # Backwards-compatible view: finite variables by name.
+    @property
+    def finites(self) -> Dict[str, FiniteVar]:
+        return self.vars
 
-    def _conditioned(self, evidence: Dict[str, EvidenceValue]):
-        assign = self._evidence_assignment(evidence)
+    # -- evidence -------------------------------------------------------
+    def _value_index(self, name: str, value: EvidenceValue) -> int:
+        var = self.vars.get(name)
+        if var is None:
+            raise KeyError(f"unknown variable {name!r}")
+        if isinstance(var, QuantizedVar) and isinstance(value, (int, float)) \
+                and not isinstance(value, bool):
+            return var.bucket_of(float(value))
+        return var._index(value)
+
+    def log_weights_for(
+        self,
+        evidence: Dict[str, EvidenceValue],
+        mode_priors: Optional[Dict[str, Dict[str, float]]] = None,
+    ) -> List[float]:
+        """Log value weights with evidence applied and, optionally, some
+        variables' static priors replaced by ``{value: prob}`` rows."""
         weights = list(self._weights)
+        spec = self.circuit.spec
+        if mode_priors:
+            for name, dist in mode_priors.items():
+                var = self.vars[name]
+                for i, value in enumerate(var.values):
+                    weights[spec.mvlit(var.fd_var, i)] = dist.get(value, 0.0)
+        for name, value in evidence.items():
+            var = self.vars[name]
+            chosen = self._value_index(name, value)
+            for i in range(len(var.values)):
+                if i != chosen:
+                    weights[spec.mvlit(var.fd_var, i)] = 0.0
+        return [-math.inf if w <= 0 else math.log(w) for w in weights]
+
+    def _conditioned_costs(
+        self, evidence: Dict[str, EvidenceValue]
+    ) -> List[float]:
         costs = list(self._costs)
-        for var, val in assign.items():
-            forbidden = -var if val else var
-            weights[lit_index(forbidden)] = 0.0
-            costs[lit_index(forbidden)] = math.inf
-        return weights, costs
+        spec = self.circuit.spec
+        for name, value in evidence.items():
+            var = self.vars[name]
+            chosen = self._value_index(name, value)
+            for i in range(len(var.values)):
+                if i != chosen:
+                    costs[spec.mvlit(var.fd_var, i)] = math.inf
+        return costs
 
     # -- queries --------------------------------------------------------
     def log_evidence(self, evidence: Dict[str, EvidenceValue]) -> float:
         """``log P(evidence)`` up to the constant weighting of unweighted
-        observables (exact when all non-mode vars are observed or
-        deterministic given modes)."""
-        weights, _ = self._conditioned(evidence)
-        log_w = [
-            -math.inf if w <= 0 else math.log(w) for w in weights
-        ]
-        return _eval.log_wmc(self.circuit, log_w)
+        observables."""
+        return fd.log_wmc(self.circuit, self.log_weights_for(evidence))
 
     def diagnoses(
         self,
@@ -280,28 +349,20 @@ class CompiledSystem:
         k: int = 5,
         project_to_modes: bool = True,
     ) -> List[Diagnosis]:
-        """The ``k`` most probable system states consistent with the
-        evidence, most probable first.
-
-        With ``project_to_modes=True`` states whose mode projection repeats
-        an earlier (more probable) state are skipped, so the result is the
-        k best *distinct* mode assignments by best-state probability.  Note
-        this ranks mode assignments by their single best supporting state
-        (pure MPE semantics), not by summing over states — exact marginal
-        posteriors per mode are available from :meth:`mode_posteriors`.
-        """
-        weights, costs = self._conditioned(evidence)
+        """The ``k`` most probable complete system states consistent with
+        the evidence (MPE semantics: mode assignments ranked by their best
+        supporting state; see :meth:`map_diagnoses` for summed posteriors)."""
+        costs = self._conditioned_costs(evidence)
         log_z = self.log_evidence(evidence)
         if log_z == -math.inf:
             return []
         out: List[Diagnosis] = []
         seen_modes: set = set()
-        # Enumerate generously; projection may collapse states.
-        for cost, assignment in enumerate_models(
+        for cost, assignment in fd.enumerate_models(
             self.circuit, costs, k=None
         ):
             modes = {
-                name: self._decode_finite(name, assignment)
+                name: self.vars[name].values[assignment[self.vars[name].fd_var]]
                 for name in self.mode_vars
             }
             key = tuple(sorted(modes.items()))
@@ -309,11 +370,10 @@ class CompiledSystem:
                 if key in seen_modes:
                     continue
                 seen_modes.add(key)
-            state = self._decode_state(assignment)
             out.append(
                 Diagnosis(
                     modes=modes,
-                    state=state,
+                    state=self._decode_state(assignment),
                     cost=cost,
                     posterior=math.exp(-cost - log_z),
                 )
@@ -326,20 +386,10 @@ class CompiledSystem:
         self, evidence: Dict[str, EvidenceValue], k: int = 5
     ) -> List[Diagnosis]:
         """The ``k`` most probable **joint mode assignments** by exact
-        summed posterior (marginal MAP), most probable first.
-
-        Unlike :meth:`diagnoses` (which ranks by best supporting complete
-        state), this sums over all unobserved non-mode variables, so the
-        ranking is the true posterior over mode assignments.  Requires the
-        default ``modes_first`` compilation; raises ValueError otherwise.
-        Posteriors of the returned list sum to 1 when ``k`` covers every
-        consistent mode assignment.
-        """
-        from .kbest import enumerate_map
-
-        weights, _ = self._conditioned(evidence)
-        log_w = [-math.inf if w <= 0 else math.log(w) for w in weights]
-        log_z = _eval.log_wmc(self.circuit, log_w)
+        summed posterior (marginal MAP), most probable first.  Requires
+        the default ``modes_first`` compilation."""
+        log_w = self.log_weights_for(evidence)
+        log_z = fd.log_wmc(self.circuit, log_w)
         if log_z == -math.inf:
             return []
         return [
@@ -355,87 +405,49 @@ class CompiledSystem:
     def ranked_map(
         self, log_w: Sequence[float], k: Optional[int]
     ) -> List[Tuple[float, Dict[str, str]]]:
-        """Ranked joint mode assignments under an explicit log-weight
-        vector: ``(cost, {mode_var: value})`` with ``cost = -log`` of the
-        summed (unnormalized) mass.  Building block for
-        :meth:`map_diagnoses` and temporal tracking."""
-        from .kbest import enumerate_map
-
-        map_vars = [
-            i for name in self.mode_vars
-            for i in self.finites[name].var_ids
-        ]
+        """Ranked joint mode assignments under explicit log weights:
+        ``(cost, {mode_var: value})``.  Building block for
+        :meth:`map_diagnoses` and :class:`dnnf.tracking.ModeTracker`."""
+        map_fd_vars = [self.vars[n].fd_var for n in self.mode_vars]
+        by_fd = {self.vars[n].fd_var: n for n in self.mode_vars}
         out: List[Tuple[float, Dict[str, str]]] = []
-        for cost, assignment in enumerate_map(
-            self.circuit, log_w, map_vars, k=k
+        for cost, assignment in fd.enumerate_map(
+            self.circuit, log_w, map_fd_vars, k=k
         ):
             modes = {
-                name: self._decode_finite(name, assignment)
-                for name in self.mode_vars
+                by_fd[v]: self.vars[by_fd[v]].values[val]
+                for v, val in assignment.items()
+                if v in by_fd
             }
             out.append((cost, modes))
         return out
 
-    def log_weights_for(
-        self,
-        evidence: Dict[str, EvidenceValue],
-        mode_priors: Optional[Dict[str, Dict[str, float]]] = None,
-    ) -> List[float]:
-        """Log literal weights with evidence applied and, optionally, the
-        static mode priors of some variables replaced (``{mode_var:
-        {value: prob}}``).  Mode variables not listed keep their compiled
-        priors."""
-        weights = list(self._weights)
-        if mode_priors:
-            for name, dist in mode_priors.items():
-                fv = self.finites[name]
-                for value, var in zip(fv.values, fv.var_ids):
-                    weights[lit_index(var)] = dist.get(value, 0.0)
-        assign = self._evidence_assignment(evidence)
-        for var, val in assign.items():
-            weights[lit_index(-var if val else var)] = 0.0
-        return [-math.inf if w <= 0 else math.log(w) for w in weights]
-
     def mode_posteriors(
         self, evidence: Dict[str, EvidenceValue]
     ) -> Dict[str, Dict[str, float]]:
-        """Exact ``P(mode = value | evidence)`` for every mode variable,
-        via WMC ratios."""
+        """Exact ``P(mode = value | evidence)`` via WMC ratios."""
         log_z = self.log_evidence(evidence)
         if log_z == -math.inf:
             raise ValueError("evidence is inconsistent with the model")
         out: Dict[str, Dict[str, float]] = {}
         for name in self.mode_vars:
-            fv = self.finites[name]
+            var = self.vars[name]
             dist: Dict[str, float] = {}
-            for value in fv.values:
+            for value in var.values:
                 ev = dict(evidence)
                 ev[name] = value
-                try:
-                    log_num = self.log_evidence(ev)
-                except KeyError:  # pragma: no cover
-                    log_num = -math.inf
-                dist[value] = math.exp(log_num - log_z)
+                dist[value] = math.exp(self.log_evidence(ev) - log_z)
             out[name] = dist
         return out
 
     # -- decoding -------------------------------------------------------
-    def _decode_finite(self, name: str, assignment: Dict[int, bool]) -> str:
-        fv = self.finites[name]
-        for value, var in zip(fv.values, fv.var_ids):
-            if assignment.get(var, False):
-                return value
-        return "?"  # unreachable on smooth circuits with exactly-one
-
     def _decode_state(
-        self, assignment: Dict[int, bool]
+        self, assignment: Dict[int, int]
     ) -> Dict[str, EvidenceValue]:
         state: Dict[str, EvidenceValue] = {}
-        for name, prop in self.bools.items():
+        for name, var in self.vars.items():
             if name.startswith("_"):
                 continue  # hidden noise-injection variables
-            if prop.var in assignment:
-                state[name] = assignment[prop.var]
-        for name in self.finites:
-            state[name] = self._decode_finite(name, assignment)
+            if var.fd_var in assignment:
+                state[name] = var.values[assignment[var.fd_var]]
         return state

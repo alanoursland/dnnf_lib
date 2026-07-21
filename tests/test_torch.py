@@ -94,6 +94,41 @@ def test_torch_mpe_matches_cpu(seed):
         assert cnf.satisfied_by(assignments[0])
 
 
+@pytest.mark.parametrize("seed", range(5))
+def test_torch_fd_circuit_log_wmc_and_mpe(seed):
+    """FD circuits evaluate through the same layered backend."""
+    import random as _random
+
+    from dnnf import fd
+    from test_fd import random_fd_cnf, random_fd_weights
+
+    rng = _random.Random(900 + seed)
+    cnf = random_fd_cnf(rng, rng.randint(3, 5), rng.randint(2, 8))
+    circuit = fd.compile_fd(cnf, smooth=True)
+    weights = random_fd_weights(rng, cnf.spec)
+    log_w = [math.log(x) for x in weights]
+    expected = fd.log_wmc(circuit, log_w)
+
+    tc = TorchCircuit(circuit, semiring="logprob")
+    got = tc(torch.tensor(log_w, dtype=torch.float64)).item()
+    if expected == -math.inf:
+        assert got == -math.inf
+    else:
+        assert got == pytest.approx(expected, rel=1e-9)
+
+    mp = TorchCircuit(circuit, semiring="neglog")
+    costs = random_fd_weights(rng, cnf.spec)
+    exp_cost, _ = fd.mpe(circuit, costs)
+    got_costs, assignments = mp.mpe(torch.tensor(costs, dtype=torch.float64))
+    if exp_cost == math.inf:
+        assert assignments[0] is None
+    else:
+        assert got_costs[0].item() == pytest.approx(exp_cost, rel=1e-9)
+        assert cnf.satisfied_by(
+            [assignments[0][v] for v in range(cnf.spec.num_vars)]
+        )
+
+
 def test_evidence_conditioning():
     cnf = CNF(num_vars=2, clauses=[(1, 2)])
     circuit = compile_cnf(cnf, smooth=True)

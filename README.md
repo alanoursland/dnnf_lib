@@ -72,6 +72,21 @@ during compilation (`modes_first=True`, the default), which constrains the
 circuit so that max-over-modes / sum-over-everything-else is a single
 sweep plus lazy k-best enumeration.
 
+The diagnosis stack runs on a **native finite-domain core** (`dnnf.fd`):
+variables carry their domains directly, circuit leaves are atomic
+assignments like `valve1=stuck_closed`, and decision nodes branch d-ways —
+no one-hot encoding, no exactly-one clauses, ~40% smaller circuits on
+mode-heavy models than the boolean lowering. Continuous quantities can be
+**quantized into bounded ranges** with threshold atoms and automatic
+bucketing of numeric evidence:
+
+```python
+level = m.quantized("level", (0.0, 10.0, 50.0, 100.0), priors=(0.2, 0.5, 0.3))
+m.sensor("low_alarm", level.below(10.0))
+m.add((leak == "large") >> level.below(10.0))
+sys.log_evidence({"level": 37.2})     # numeric evidence, bucketed for you
+```
+
 Sensors can be noisy (`m.sensor("alarm", expr, false_positive=0.1,
 false_negative=0.2)`), and `dnnf.ModeTracker` runs the monitoring loop:
 per-mode transition matrices, observations each timestep, and a
@@ -112,7 +127,9 @@ producing leaf weights, trained end-to-end through exact inference.
 | `dnnf.eval` | semiring sweeps: SAT, counting, WMC, log-WMC, MPE |
 | `dnnf.kbest` | lazy ordered model enumeration |
 | `dnnf.torch_backend` | layered batched tensor evaluation, marginals |
-| `dnnf.diagnosis` | `SystemModel` / ranked diagnoses / posteriors |
+| `dnnf.fd` | native finite-domain core: FD-CNF, compiler, queries, MAP |
+| `dnnf.diagnosis` | `SystemModel` / ranked diagnoses / posteriors / quantized vars |
+| `dnnf.tracking` | `ModeTracker` temporal filtering |
 | `dnnf.nnf_io` | c2d `.nnf` interop |
 
 ## Tests

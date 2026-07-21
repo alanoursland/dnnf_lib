@@ -64,7 +64,17 @@ class TorchCircuit:
         self.semiring = semiring
         self.device = torch.device(device)
         self.dtype = dtype
-        self.num_vars = circuit.num_vars
+        # Boolean circuits index weights by lit_index (length 2n); FD
+        # circuits (dnnf.fd.FDCircuit) provide their own dense leaf
+        # indexing (length spec.total) via duck-typed hooks.
+        self._leaf_index = getattr(circuit, "leaf_index", lit_index)
+        self._is_fd = hasattr(circuit, "spec")
+        self.num_vars = (
+            circuit.spec.num_vars if self._is_fd else circuit.num_vars
+        )
+        self.num_weight_slots = getattr(
+            circuit, "num_weight_slots", 2 * self.num_vars
+        )
         self._build(circuit)
 
     # ------------------------------------------------------------------
@@ -102,7 +112,7 @@ class TorchCircuit:
                 break
             kind = circuit.kinds[old]
             if kind == LIT:
-                leaf_lit_idx.append(lit_index(circuit.lits[old]))
+                leaf_lit_idx.append(self._leaf_index(circuit.lits[old]))
             elif kind == TRUE:
                 const_vals.append(one)
             else:  # FALSE
@@ -319,14 +329,19 @@ class TorchCircuit:
                 assignments.append(None)
                 continue
             row = vals_cpu[b]
-            out: Dict[int, bool] = {}
+            spec = getattr(circuit, "spec", None)
+            out: Dict[int, object] = {}
             stack = [circuit.root]
             while stack:
                 i = stack.pop()
                 kind = circuit.kinds[i]
                 if kind == LIT:
                     lit = circuit.lits[i]
-                    out[abs(lit)] = lit > 0
+                    if spec is not None:  # FD circuit: {var: value_index}
+                        var, val = spec.decode(lit)
+                        out[var] = val
+                    else:
+                        out[abs(lit)] = lit > 0
                 elif kind == AND:
                     stack.extend(circuit.children[i])
                 elif kind == OR:
@@ -344,7 +359,14 @@ class TorchCircuit:
         self, probs: Dict[int, float], batch: int = 1
     ) -> torch.Tensor:
         """Build a ``(batch, 2n)`` weight tensor from per-variable
-        ``P(v = true)`` (default 0.5), in this circuit's semiring."""
+        ``P(v = true)`` (default 0.5), in this circuit's semiring.
+        Boolean circuits only; for FD circuits build the per-value weight
+        tensor directly (one slot per (var, value), see FDSpec.mvlit)."""
+        if self._is_fd:
+            raise ValueError(
+                "weights_from_probs is boolean-only; FD circuits take a "
+                "(B, spec.total) tensor indexed by mvlit"
+            )
         row = []
         for v in range(1, self.num_vars + 1):
             p = probs.get(v, 0.5)
@@ -360,7 +382,14 @@ class TorchCircuit:
         self, weights: torch.Tensor, evidence: Dict[int, bool]
     ) -> torch.Tensor:
         """Return a copy of ``weights`` with evidence-contradicting literals
-        annihilated (``-inf`` for logprob, ``+inf`` for neglog)."""
+        annihilated (``-inf`` for logprob, ``+inf`` for neglog).  Boolean
+        circuits only; for FD circuits annihilate the ruled-out values'
+        mvlit slots directly."""
+        if self._is_fd:
+            raise ValueError(
+                "condition is boolean-only; for FD circuits mask the "
+                "ruled-out (var, value) weight slots directly"
+            )
         w = weights.clone()
         if w.dim() == 1:
             w = w.unsqueeze(0)

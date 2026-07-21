@@ -33,11 +33,16 @@ library. Findings from modeling a 5-component home solar+battery system
    day-4 posterior snap in the tracking demo into a gradual, believable
    accumulation of suspicion. *Lesson: the DSL needs probabilistic
    primitives, not just logical ones.*
-2. **No quantitative abstraction.** "Degraded PV produces *some* current"
-   forced a coarse boolean abstraction where `degraded` and `ok` are
-   indistinguishable to the `pv_current` sensor. Real modeling wants
-   ordered domains and threshold atoms (`level >= low`), compiled to
-   one-hot ranges. This is the next DSL gap after noise.
+2. **No quantitative abstraction.** ✅ *Addressed:* "degraded PV produces
+   *some* current" forced a coarse boolean abstraction. This produced two
+   changes: the whole stack moved to a **native finite-domain core**
+   (leaves are `var=value`, d-way decisions, ~40% smaller circuits on
+   mode-heavy models), and `m.quantized(name, boundaries)` now gives
+   continuous quantities as bounded ranges with threshold atoms
+   (`level.below(10)`, `level.between(10, 50)`) and automatic bucketing
+   of numeric evidence (`{"level": 37.2}`). Remaining: ordered-domain
+   sugar like direction-of-change variables (see
+   `docs/QUALITATIVE_REASONING.md`).
 3. **Mixed operator/function syntax.** `&`, `|`, `~`, `>>` are operators
    but equivalence is `iff(a, b)` — the seam shows. Minor, but a domain
    engineer would notice.

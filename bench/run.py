@@ -77,10 +77,12 @@ def pigeonhole(pigeons: int, holes: int) -> CNF:
     return cnf
 
 
-def diagnosis_chain(num_components: int) -> CNF:
-    """A serial system: component i (3 modes, one-hot) passes its input to
-    i+1 unless stuck_closed; per-stage flow sensors.  Structurally similar
-    to compiled system models: local interactions, long chains."""
+def diagnosis_chain(num_components: int):
+    """A serial system: component i (3 modes) passes its input to i+1
+    unless stuck_closed; per-stage flow sensors.  Structurally similar to
+    compiled system models: local interactions, long chains.  Returns an
+    FDCnf (native multi-valued)."""
+    from dnnf import fd
     from dnnf.diagnosis import SystemModel
     from dnnf.formula import iff
 
@@ -95,9 +97,7 @@ def diagnosis_chain(num_components: int) -> CNF:
         out = m.bool(f"flow{i + 1}")
         m.add(iff(out, flows[-1] & (v != "stuck_closed")))
         flows.append(out)
-    from dnnf.formula import encode
-
-    encode(m._constraints, m.cnf)
+    fd.encode(m._constraints, m.cnf)
     return m.cnf
 
 
@@ -122,7 +122,27 @@ FAMILIES: Dict[str, List[Tuple[str, Callable[[], CNF]]]] = {
 HEURISTICS = ("dynamic", "minfill")
 
 
-def run_one(name: str, cnf: CNF, heuristic: str) -> Dict[str, object]:
+def run_one(name: str, cnf, heuristic: str) -> Optional[Dict[str, object]]:
+    from dnnf import fd
+
+    if isinstance(cnf, fd.FDCnf):
+        if heuristic != "dynamic":
+            return None  # static heuristics not yet ported to FD
+        t0 = time.time()
+        circuit = fd.compile_fd(cnf, smooth=True)
+        compile_s = time.time() - t0
+        t0 = time.time()
+        count = fd.model_count(circuit)
+        query_s = time.time() - t0
+        return {
+            "instance": name,
+            "heuristic": "dynamic",
+            "nodes": len(circuit),
+            "edges": circuit.num_edges,
+            "compile_s": compile_s,
+            "query_s": query_s,
+            "count": count,
+        }
     t0 = time.time()
     circuit = compile_cnf(cnf, smooth=True, heuristic=heuristic)
     compile_s = time.time() - t0
@@ -152,6 +172,8 @@ def main() -> None:
             counts = set()
             for h in HEURISTICS:
                 r = run_one(name, cnf, h)
+                if r is None:
+                    continue
                 rows.append(r)
                 counts.add(r["count"])
             assert len(counts) == 1, f"count mismatch on {name}: {counts}"
