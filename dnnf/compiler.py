@@ -109,6 +109,51 @@ def _components(clauses: ClauseSet) -> List[ClauseSet]:
     return [frozenset(g) for g in groups.values()]
 
 
+def minfill_order(cnf: CNF) -> List[int]:
+    """A static branching order from min-fill elimination on the primal graph.
+
+    Min-fill repeatedly eliminates the variable whose neighborhood needs the
+    fewest fill-in edges to become a clique — a standard treewidth heuristic.
+    Variables eliminated *last* sit in the densest, most central part of the
+    interaction graph, so branching on them *first* tends to disconnect the
+    residual clause set quickly, which is exactly what produces small
+    decomposable circuits.  Returns the reversed elimination order.
+    """
+    adj: Dict[int, set] = {v: set() for v in range(1, cnf.num_vars + 1)}
+    for clause in cnf.clauses:
+        cvars = [abs(l) for l in clause]
+        for i in range(len(cvars)):
+            for j in range(i + 1, len(cvars)):
+                if cvars[i] != cvars[j]:
+                    adj[cvars[i]].add(cvars[j])
+                    adj[cvars[j]].add(cvars[i])
+    remaining = set(adj)
+    elim: List[int] = []
+
+    def fill_cost(v: int) -> int:
+        nbrs = list(adj[v])
+        cost = 0
+        for i in range(len(nbrs)):
+            for j in range(i + 1, len(nbrs)):
+                if nbrs[j] not in adj[nbrs[i]]:
+                    cost += 1
+        return cost
+
+    while remaining:
+        v = min(remaining, key=lambda u: (fill_cost(u), len(adj[u]), u))
+        nbrs = list(adj[v])
+        for i in range(len(nbrs)):
+            for j in range(i + 1, len(nbrs)):
+                adj[nbrs[i]].add(nbrs[j])
+                adj[nbrs[j]].add(nbrs[i])
+        for u in nbrs:
+            adj[u].discard(v)
+        del adj[v]
+        remaining.remove(v)
+        elim.append(v)
+    return list(reversed(elim))
+
+
 def _pick_var(clauses: ClauseSet, order: Optional[Sequence[int]]) -> int:
     if order is not None:
         present = {abs(l) for c in clauses for l in c}
@@ -124,6 +169,7 @@ def compile_cnf(
     cnf: CNF,
     var_order: Optional[Sequence[int]] = None,
     smooth: bool = False,
+    heuristic: str = "dynamic",
 ) -> Circuit:
     """Compile a CNF into a decision-DNNF circuit.
 
@@ -132,13 +178,23 @@ def compile_cnf(
     cnf:
         The input formula.
     var_order:
-        Optional static branching order (list of variable indices).  When
-        omitted, a dynamic most-occurrences heuristic is used.  The order
-        strongly influences circuit size.
+        Optional static branching order (list of variable indices).
+        Variables listed here are branched before any others (earliest
+        first); components containing none of them fall back to the
+        heuristic.  The order strongly influences circuit size.
     smooth:
         If True, the result is also smoothed (required for model counting
         and weighted model counting via semiring evaluation).
+    heuristic:
+        ``"dynamic"`` — most-occurrences scoring per component (default);
+        ``"minfill"`` — a static order from min-fill elimination on the
+        primal graph (see :func:`minfill_order`), usually much better on
+        structured instances.  Ignored when ``var_order`` is given.
     """
+    if var_order is None and heuristic == "minfill":
+        var_order = minfill_order(cnf)
+    elif var_order is None and heuristic != "dynamic":
+        raise ValueError(f"unknown heuristic {heuristic!r}")
     builder = CircuitBuilder(cnf.num_vars)
     pre = _preprocess(cnf)
     if pre is None:

@@ -87,7 +87,8 @@ class SystemModel:
         self._constraints: List[Formula] = []
         self._bools: Dict[str, Prop] = {}
         self._finites: Dict[str, FiniteVar] = {}
-        self._priors: Dict[int, float] = {}  # positive-literal weight per var
+        # var -> (positive-literal weight, negative-literal weight)
+        self._priors: Dict[int, Tuple[float, float]] = {}
         self._mode_vars: List[str] = []
 
     # -- variable declaration ------------------------------------------
@@ -99,7 +100,7 @@ class SystemModel:
         p = Prop(self.cnf.add_var(), name)
         self._bools[name] = p
         if prior is not None:
-            self._priors[p.var] = prior
+            self._priors[p.var] = (prior, 1.0 - prior)
         return p
 
     def finite(
@@ -126,7 +127,10 @@ class SystemModel:
                 raise ValueError("priors length must match values")
             total = sum(priors)
             for i, p in zip(ids, priors):
-                self._priors[i] = p / total
+                # One-hot encoding: prior mass on the positive literal,
+                # neutral weight on the negative (exactly-one constraints
+                # make the product over a component equal its chosen prior).
+                self._priors[i] = (p / total, 1.0)
         if mode or priors is not None:
             self._mode_vars.append(name)
         return fv
@@ -141,9 +145,27 @@ class SystemModel:
         self._constraints.append(formula)
 
     # ------------------------------------------------------------------
-    def compile(self, var_order: Optional[Sequence[int]] = None) -> "CompiledSystem":
+    def compile(
+        self,
+        var_order: Optional[Sequence[int]] = None,
+        modes_first: bool = True,
+    ) -> "CompiledSystem":
+        """Compile the system to a smooth d-DNNF.
+
+        With ``modes_first=True`` (default), mode variables are branched
+        before all others, which constrains the circuit so that
+        :meth:`CompiledSystem.map_diagnoses` — exact marginal MAP over
+        modes — is available.  Pass ``modes_first=False`` (or a custom
+        ``var_order``) to let the heuristic choose freely, possibly at the
+        price of losing that query.
+        """
         num_original = self.cnf.num_vars
         encode(self._constraints, self.cnf)
+        if var_order is None and modes_first:
+            var_order = [
+                i for name in self._mode_vars
+                for i in self._finites[name].var_ids
+            ]
         circuit = compile_cnf(self.cnf, var_order=var_order, smooth=True)
         return CompiledSystem(
             circuit=circuit,
@@ -161,7 +183,7 @@ class CompiledSystem:
         circuit: Circuit,
         bools: Dict[str, Prop],
         finites: Dict[str, FiniteVar],
-        priors: Dict[int, float],
+        priors: Dict[int, Tuple[float, float]],
         mode_vars: List[str],
         num_original: int,
     ):
@@ -174,8 +196,9 @@ class CompiledSystem:
         n = circuit.num_vars
         # Probability weights (for WMC) and neg-log costs (for MPE/k-best).
         self._weights = [1.0] * (2 * n)
-        for var, p in priors.items():
-            self._weights[lit_index(var)] = p
+        for var, (pos, neg) in priors.items():
+            self._weights[lit_index(var)] = pos
+            self._weights[lit_index(-var)] = neg
         self._costs = [
             0.0 if w == 1.0 else (math.inf if w <= 0 else -math.log(w))
             for w in self._weights
@@ -268,6 +291,48 @@ class CompiledSystem:
             )
             if len(out) >= k:
                 break
+        return out
+
+    def map_diagnoses(
+        self, evidence: Dict[str, EvidenceValue], k: int = 5
+    ) -> List[Diagnosis]:
+        """The ``k`` most probable **joint mode assignments** by exact
+        summed posterior (marginal MAP), most probable first.
+
+        Unlike :meth:`diagnoses` (which ranks by best supporting complete
+        state), this sums over all unobserved non-mode variables, so the
+        ranking is the true posterior over mode assignments.  Requires the
+        default ``modes_first`` compilation; raises ValueError otherwise.
+        Posteriors of the returned list sum to 1 when ``k`` covers every
+        consistent mode assignment.
+        """
+        from .kbest import enumerate_map
+
+        weights, _ = self._conditioned(evidence)
+        log_w = [-math.inf if w <= 0 else math.log(w) for w in weights]
+        log_z = _eval.log_wmc(self.circuit, log_w)
+        if log_z == -math.inf:
+            return []
+        map_vars = [
+            i for name in self.mode_vars
+            for i in self.finites[name].var_ids
+        ]
+        out: List[Diagnosis] = []
+        for cost, assignment in enumerate_map(
+            self.circuit, log_w, map_vars, k=k
+        ):
+            modes = {
+                name: self._decode_finite(name, assignment)
+                for name in self.mode_vars
+            }
+            out.append(
+                Diagnosis(
+                    modes=modes,
+                    state=dict(modes),
+                    cost=cost,
+                    posterior=math.exp(-cost - log_z),
+                )
+            )
         return out
 
     def mode_posteriors(

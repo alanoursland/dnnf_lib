@@ -26,7 +26,7 @@ GPU evaluation (requires ``pip install dnnf-lib[torch]``)::
 
 from .circuit import Circuit, CircuitBuilder, lit_index
 from .cnf import CNF
-from .compiler import compile_cnf
+from .compiler import compile_cnf, minfill_order
 from .diagnosis import CompiledSystem, Diagnosis, SystemModel
 from .eval import (
     condition_weights,
@@ -40,7 +40,7 @@ from .eval import (
     wmc,
 )
 from .formula import And, Formula, Not, Or, Prop, at_most_one, exactly_one, iff, xor
-from .kbest import enumerate_models
+from .kbest import enumerate_map, enumerate_models
 from . import nnf_io
 
 __version__ = "0.1.0"
@@ -64,7 +64,9 @@ __all__ = [
     "compile_cnf",
     "condition_weights",
     "costs_from_probs",
+    "enumerate_map",
     "enumerate_models",
+    "minfill_order",
     "is_satisfiable",
     "lit_index",
     "log_wmc",

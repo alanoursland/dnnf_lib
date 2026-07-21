@@ -109,6 +109,100 @@ class _NodeStream:
         return self.items[i]
 
 
+def enumerate_map(
+    circuit: Circuit,
+    log_weights: Sequence[float],
+    map_vars,
+    k: Optional[int] = None,
+) -> Iterator[Tuple[float, Dict[int, bool]]]:
+    """Ranked **marginal MAP**: yield assignments to ``map_vars`` ordered by
+    their *summed* probability mass over all other variables, best first.
+
+    Yields ``(cost, {map_var: bool})`` where ``cost = -log( sum over
+    completions of the product of literal weights )``; normalize externally
+    by log-WMC to get posteriors.
+
+    Marginal MAP is intractable on arbitrary d-DNNF; this requires a
+    **constrained** circuit in which decisions on ``map_vars`` sit above all
+    other decisions (compile with ``var_order=list(map_vars)`` so they are
+    branched first).  The structure is verified and a ValueError is raised
+    if it does not hold.
+
+    Mechanics: one log-sum-exp sweep computes every node's summed value;
+    nodes mentioning no map variable become terminals with that value, and
+    the lazy k-best machinery then enumerates over the remaining upper
+    region, where every OR is a decision on a map variable (max) and every
+    AND is a product (sum of costs).
+    """
+    from .eval import log_values
+
+    map_vars = frozenset(map_vars)
+    if not circuit.is_smooth() or (
+        circuit.kinds[circuit.root] != FALSE
+        and circuit.mentioned_vars()
+        != frozenset(range(1, circuit.num_vars + 1))
+    ):
+        circuit = circuit.smooth()
+
+    vals = log_values(circuit, log_weights)
+    var_sets = circuit.var_sets()
+    asserted = circuit.asserted_literals()
+    has_map = [bool(var_sets[i] & map_vars) for i in range(len(circuit))]
+
+    # Verify the constrained structure: every OR mentioning a map variable
+    # must be a decision on one, i.e. each child asserts a literal of some
+    # common map variable.
+    for i, kind in enumerate(circuit.kinds):
+        if kind != OR or not has_map[i]:
+            continue
+        candidates = map_vars & {abs(l) for l in asserted[circuit.children[i][0]]}
+        for c in circuit.children[i][1:]:
+            candidates = candidates & {abs(l) for l in asserted[c]}
+            if not candidates:
+                break
+        if not candidates:
+            raise ValueError(
+                "circuit is not constrained for marginal MAP over these "
+                "variables; compile with var_order listing the MAP "
+                "variables first"
+            )
+
+    streams: List[Optional[_NodeStream]] = [None] * len(circuit)
+    for i, kind in enumerate(circuit.kinds):
+        if not has_map[i]:
+            # Terminal: entire subtree is summed out.
+            cost = -vals[i]
+            first = None if cost == math.inf else (cost, ())
+            streams[i] = _NodeStream(LIT, (), first)
+        elif kind == LIT:
+            lit = circuit.lits[i]
+            cost = -log_weights[lit_index(lit)]
+            first = None if cost == math.inf else (cost, (lit,))
+            streams[i] = _NodeStream(LIT, (), first)
+        else:  # AND / OR in the upper (map) region
+            streams[i] = _NodeStream(
+                kind, [streams[c] for c in circuit.children[i]], None
+            )
+
+    root = streams[circuit.root]
+    emitted = 0
+    seen: set = set()
+    i = 0
+    while k is None or emitted < k:
+        d = root.get(i)
+        i += 1
+        if d is None:
+            return
+        cost, lits = d
+        if cost == math.inf:
+            return
+        if lits in seen:
+            continue
+        seen.add(lits)
+        yield cost, {abs(l): l > 0 for l in lits}
+        emitted += 1
+
+
 def enumerate_models(
     circuit: Circuit,
     costs: Sequence[float],

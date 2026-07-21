@@ -156,9 +156,8 @@ def wmc(circuit: Circuit, weights: Sequence[float]) -> float:
     return vals[circuit.root]
 
 
-def log_wmc(circuit: Circuit, log_weights: Sequence[float]) -> float:
-    """Log-space WMC.  ``log_weights`` holds log literal weights;
-    returns ``log(WMC)`` (``-inf`` for an inconsistent circuit).
+def log_values(circuit: Circuit, log_weights: Sequence[float]) -> List[float]:
+    """Per-node log-WMC values (full bottom-up log-sum-exp sweep).
     Requires a smooth d-DNNF."""
     _require_smooth_ddnnf(circuit)
 
@@ -170,7 +169,7 @@ def log_wmc(circuit: Circuit, log_weights: Sequence[float]) -> float:
         m = max(a, b)
         return m + math.log(math.exp(a - m) + math.exp(b - m))
 
-    vals = _forward(
+    return _forward(
         circuit,
         leaf=lambda lit: log_weights[lit_index(lit)],
         add=lse,
@@ -178,7 +177,13 @@ def log_wmc(circuit: Circuit, log_weights: Sequence[float]) -> float:
         zero=-math.inf,
         one=0.0,
     )
-    return vals[circuit.root]
+
+
+def log_wmc(circuit: Circuit, log_weights: Sequence[float]) -> float:
+    """Log-space WMC.  ``log_weights`` holds log literal weights;
+    returns ``log(WMC)`` (``-inf`` for an inconsistent circuit).
+    Requires a smooth d-DNNF."""
+    return log_values(circuit, log_weights)[circuit.root]
 
 
 def mpe(

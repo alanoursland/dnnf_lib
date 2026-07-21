@@ -15,12 +15,13 @@ Low-risk work that makes everything after it easier.
 - **CI**: GitHub Actions running the test matrix (with and without torch),
   plus a lint pass. The brute-force cross-validation suite is the safety
   net for all compiler work below; it should run on every commit.
-- **Benchmark harness**: a `bench/` directory with seeded instance
-  generators (random k-CNF at controlled density, chains, grids,
-  pigeonhole) and standard public instances (ISCAS85 diagnosis circuits
-  such as c432/c499 are the classic model-based-diagnosis benchmarks;
-  DQMR and grid networks for counting). Track circuit size, compile time,
-  and query time per commit so heuristic changes are measured, not vibed.
+- **Benchmark harness**: ✅ *Started:* `bench/run.py` compares heuristics
+  on random k-CNF, chains, grids, pigeonhole, and generated diagnosis
+  models, with a built-in count cross-check. Measured result so far:
+  min-fill helps on structured instances (grids, diagnosis chains) and
+  hurts on random CNF, so `dynamic` remains the default. Still to add:
+  standard public instances (ISCAS85 diagnosis circuits such as c432/c499;
+  DQMR and grid networks for counting) and per-commit tracking.
 - **Property-based fuzzing**: `hypothesis` strategies generating CNFs and
   evidence sets, asserting the invariants we already test (count parity,
   k-best order, torch/CPU agreement). Random seeds catch bugs; shrinking
@@ -35,13 +36,14 @@ The gap between this compiler and c2d/dsharp/D4 is almost entirely
 decomposition-heuristic quality and constant factors. Ordered by expected
 leverage:
 
-1. **Static decomposition orders.** Min-fill and MCS orderings over the
-   primal graph; better, build a **dtree** by recursive hypergraph
-   partitioning of the clause set (KaHyPar or a simple FM heuristic) and
-   branch to cut components apart, the way c2d does. System models —
-   mostly-local component interconnections — are exactly the structured
-   instances where this wins big. This is the highest-value item in the
-   whole document.
+1. **Static decomposition orders.** ✅ *Partially done:* min-fill order is
+   implemented (`compile_cnf(..., heuristic="minfill")`); benchmarks show
+   it helps on structured instances and hurts on random ones. The real
+   prize remains: build a **dtree** by recursive hypergraph partitioning
+   of the clause set (KaHyPar or a simple FM heuristic) and branch to cut
+   components apart, the way c2d does. System models — mostly-local
+   component interconnections — are exactly the structured instances where
+   this wins big. This is the highest-value item in the whole document.
 2. **Dynamic scoring.** VSADS-style hybrid of static structure and
    activity, favoring variables that split components.
 3. **Sound preprocessing.** Subsumption, self-subsuming resolution,
@@ -67,16 +69,13 @@ leverage:
 
 ## Horizon 2 — Query layer completeness (weeks, parallel to H1)
 
-- **Marginal MAP over modes.** `diagnoses()` currently ranks mode
-  assignments by best supporting state (MPE semantics). The principled
-  diagnosis posterior sums over non-mode variables — marginal MAP, which
-  is intractable on arbitrary d-DNNF but tractable when *mode variables
-  are decided above all others* in the circuit. Concretely: pass a
-  constrained variable order (modes first) to the compiler, verify the
-  constraint held, then max over the top (mode) decisions and sum below.
-  This turns the current documented caveat into an exact, defaulted-on
-  semantics. Probably the most important *correctness* upgrade for the
-  diagnosis story.
+- **Marginal MAP over modes.** ✅ *Done:* `SystemModel.compile()` now
+  branches mode variables first by default, the constrained structure is
+  verified, and `CompiledSystem.map_diagnoses()` / `dnnf.enumerate_map()`
+  return joint mode assignments ranked by exact summed posterior (lazy
+  k-best over the mode region with log-sum-exp values as terminal costs).
+  Remaining refinement: constrained *dtree* construction so the modes-first
+  restriction costs less circuit size on large models.
 - **Minimum-cardinality diagnoses.** Darwiche's classic: min-sum with
   unit fault costs gives minimum fault cardinality; enumerate within a
   cardinality bound. Cheap to add on the existing tropical machinery and

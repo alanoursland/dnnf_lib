@@ -122,15 +122,10 @@ class Circuit:
                 return False
         return True
 
-    def is_deterministic(self) -> bool:
-        """Syntactic determinism check (sufficient, not necessary).
-
-        Two OR-children are considered provably inconsistent when one asserts
-        a literal whose negation the other asserts, where the *asserted*
-        literals of a node are: the literal itself for a leaf, and the union
-        of children's asserted literals for an AND node.  This covers decision
-        nodes produced by the compiler and smoothing gadgets ``(v OR ~v)``.
-        """
+    def asserted_literals(self) -> List[frozenset]:
+        """Per-node sets of literals every model of the node must satisfy
+        (syntactic under-approximation): the literal itself for a leaf, the
+        union over children for AND, empty for OR/constants."""
         asserted: List[frozenset] = []
         for i, kind in enumerate(self.kinds):
             if kind == LIT:
@@ -142,6 +137,17 @@ class Circuit:
                 asserted.append(s)
             else:
                 asserted.append(frozenset())
+        return asserted
+
+    def is_deterministic(self) -> bool:
+        """Syntactic determinism check (sufficient, not necessary).
+
+        Two OR-children are considered provably inconsistent when one asserts
+        a literal whose negation the other asserts (see
+        :meth:`asserted_literals`).  This covers decision nodes produced by
+        the compiler and smoothing gadgets ``(v OR ~v)``.
+        """
+        asserted = self.asserted_literals()
         for i, kind in enumerate(self.kinds):
             if kind != OR:
                 continue

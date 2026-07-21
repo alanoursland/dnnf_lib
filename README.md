@@ -61,9 +61,16 @@ m.add(iff(flow2, v2 != "stuck_closed"))
 
 system = m.compile()                                   # offline
 for d in system.diagnoses({"flow1": False, "flow2": True}, k=3):  # online
-    print(d)                # most probable mode assignments, ranked
+    print(d)                # ranked by best supporting state (MPE)
+for d in system.map_diagnoses({"flow1": False}, k=3):
+    print(d)                # ranked by exact summed posterior (marginal MAP)
 system.mode_posteriors({"flow1": False})   # exact P(mode=value | evidence)
 ```
+
+`map_diagnoses` is exact marginal MAP — mode variables are branched first
+during compilation (`modes_first=True`, the default), which constrains the
+circuit so that max-over-modes / sum-over-everything-else is a single
+sweep plus lazy k-best enumeration.
 
 ## GPU / batched evaluation (PyTorch)
 
