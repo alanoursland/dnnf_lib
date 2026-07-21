@@ -492,37 +492,63 @@ class _FDCompiler:
             counts.update(self.cvars[cid])
         return min(counts, key=lambda v: (-counts[v], v))
 
-    def solve(self, cids: FrozenSet[int]) -> int:
-        node = self.memo.get(cids)
-        if node is not None:
-            return node
+    def solve(self, root: FrozenSet[int]) -> int:
+        """Iterative (explicit-stack) version of the exhaustive search —
+        no Python recursion, so circuit depth is unbounded by the
+        interpreter's recursion limit.  Frames: ``visit`` runs
+        BCP/decomposition for a clause set; ``comp`` branches a
+        component on a variable; ``finish_*`` combine memoized results
+        (pushed below their dependencies, LIFO order resolves them)."""
         b = self.builder
-        assigned, residual = self.bcp(cids)
-        if assigned is None:
-            node = b.false()
-        else:
-            parts = [
-                b.leaf(var, val) for var, val in sorted(assigned.items())
-            ]
-            for comp in self.components(residual):
-                comp_node = self.memo.get(comp)
-                if comp_node is None:
-                    var = self.pick_var(comp)
-                    branches = [
-                        b.and_(
-                            [
-                                b.leaf(var, val),
-                                self.solve(self.assign_set(comp, var, val)),
-                            ]
-                        )
-                        for val in range(self.spec.sizes[var])
-                    ]
-                    comp_node = b.or_(branches)
-                    self.memo[comp] = comp_node
-                parts.append(comp_node)
-            node = b.and_(parts)
-        self.memo[cids] = node
-        return node
+        memo = self.memo
+        stack: List[Tuple] = [("visit", root)]
+        while stack:
+            frame = stack.pop()
+            tag = frame[0]
+            if tag == "visit":
+                cids = frame[1]
+                if cids in memo:
+                    continue
+                assigned, residual = self.bcp(cids)
+                if assigned is None:
+                    memo[cids] = b.false()
+                    continue
+                comps = self.components(residual)
+                stack.append(("finish_set", cids, assigned, comps))
+                for comp in comps:
+                    if comp not in memo:
+                        stack.append(("comp", comp))
+            elif tag == "comp":
+                comp = frame[1]
+                if comp in memo:
+                    continue
+                var = self.pick_var(comp)
+                subsets = [
+                    self.assign_set(comp, var, val)
+                    for val in range(self.spec.sizes[var])
+                ]
+                stack.append(("finish_comp", comp, var, subsets))
+                for sub in subsets:
+                    if sub not in memo:
+                        stack.append(("visit", sub))
+            elif tag == "finish_comp":
+                _, comp, var, subsets = frame
+                if comp not in memo:
+                    memo[comp] = b.or_(
+                        [
+                            b.and_([b.leaf(var, val), memo[sub]])
+                            for val, sub in enumerate(subsets)
+                        ]
+                    )
+            else:  # finish_set
+                _, cids, assigned, comps = frame
+                parts = [
+                    b.leaf(var, val)
+                    for var, val in sorted(assigned.items())
+                ]
+                parts.extend(memo[comp] for comp in comps)
+                memo[cids] = b.and_(parts)
+        return memo[root]
 
 
 def compile_fd(
@@ -550,14 +576,7 @@ def compile_fd(
         b = FDBuilder(spec)
         return b.finish(b.false())
     comp = _FDCompiler(cnf, var_order)
-    old_limit = sys.getrecursionlimit()
-    sys.setrecursionlimit(max(old_limit, 10000 + 50 * spec.num_vars))
-    try:
-        root = comp.solve(
-            frozenset(comp.intern(c) for c in cnf.clauses)
-        )
-    finally:
-        sys.setrecursionlimit(old_limit)
+    root = comp.solve(frozenset(comp.intern(c) for c in cnf.clauses))
     circuit = comp.builder.finish(root)
     if smooth:
         circuit = circuit.smooth()
