@@ -1,0 +1,110 @@
+# dnnf_lib
+
+Compilation of propositional theories to **Decomposable Negation Normal
+Form (DNNF)**, tractable weighted reasoning on the compiled circuits, and
+model-based diagnosis — with an optional **PyTorch backend** for batched
+GPU evaluation and autograd-powered marginals.
+
+The architecture follows the knowledge-compilation approach used in
+DNNF-based diagnosis at NASA JPL: encode a system model (component modes
+with priors, observables, expectations) into logic, compile **once**
+offline into a small circuit, then answer observation queries **online** in
+time linear in circuit size — including enumerating complete system states
+ordered from most to least probable, with leaf weights read as negative
+log probabilities. See [docs/DESIGN.md](docs/DESIGN.md) for the full
+technical treatment.
+
+## Install
+
+```bash
+pip install -e .            # core: pure Python, no dependencies
+pip install -e .[torch]     # + PyTorch backend
+pip install -e .[dev]       # + pytest
+```
+
+## Quick start: compile and query
+
+```python
+import dnnf
+
+cnf = dnnf.CNF(num_vars=3, clauses=[(1, 2), (-1, 3)])
+circuit = dnnf.compile_cnf(cnf, smooth=True)   # decision-DNNF: decomposable,
+                                               # deterministic, smooth
+dnnf.model_count(circuit)                      # 4
+dnnf.wmc(circuit, dnnf.weights_from_probs(3, {1: 0.9, 2: 0.5, 3: 0.5}))
+
+# MPE / most probable model under neg-log costs
+costs = dnnf.costs_from_probs(3, {1: 0.9, 2: 0.5, 3: 0.5})
+cost, best = dnnf.mpe(circuit, costs)
+
+# Models ordered most-probable-first (lazy k-best)
+for cost, model in dnnf.enumerate_models(circuit, costs, k=5):
+    print(cost, model)
+```
+
+DIMACS CNF (`dnnf.CNF.from_dimacs`) and the c2d `.nnf` circuit format
+(`dnnf.nnf_io`) are supported, so circuits from external compilers
+(c2d, dsharp, D4) plug into the same evaluators.
+
+## Diagnosis: modes, priors, ranked explanations
+
+```python
+from dnnf import SystemModel, iff
+
+m = SystemModel()
+v1 = m.mode("valve1", ("ok", "stuck_open", "stuck_closed"), priors=(0.98, 0.01, 0.01))
+v2 = m.mode("valve2", ("ok", "stuck_open", "stuck_closed"), priors=(0.98, 0.01, 0.01))
+flow1, flow2 = m.bool("flow1"), m.bool("flow2")
+m.add(iff(flow1, v1 != "stuck_closed"))
+m.add(iff(flow2, v2 != "stuck_closed"))
+
+system = m.compile()                                   # offline
+for d in system.diagnoses({"flow1": False, "flow2": True}, k=3):  # online
+    print(d)                # most probable mode assignments, ranked
+system.mode_posteriors({"flow1": False})   # exact P(mode=value | evidence)
+```
+
+## GPU / batched evaluation (PyTorch)
+
+```python
+import torch
+from dnnf.torch_backend import TorchCircuit
+
+tc = TorchCircuit(circuit, semiring="logprob", device="cuda")
+w = tc.weights_from_probs({1: 0.9}, batch=1024)   # (B, 2n) log-weights
+log_z = tc(tc.condition(w, {2: True}))            # batched log-WMC
+marginals = tc.marginals(w)                       # (B, 2n) posteriors:
+                                                  # one backward pass computes
+                                                  # every P(lit | evidence)
+
+mp = TorchCircuit(circuit, semiring="neglog")     # min-sum semiring
+costs, states = mp.mpe(cost_tensor)               # batched MPE
+```
+
+Because evaluation is ordinary autograd-friendly tensor code, the circuit
+composes with other PyTorch models — e.g. neural observation models
+producing leaf weights, trained end-to-end through exact inference.
+
+## Layout
+
+| Module | Contents |
+|---|---|
+| `dnnf.cnf` | CNF container, DIMACS I/O |
+| `dnnf.formula` | propositional AST, Tseitin encoding |
+| `dnnf.compiler` | CNF → decision-DNNF (DPLL + components + caching) |
+| `dnnf.circuit` | circuit arrays, property checks, smooth/condition |
+| `dnnf.eval` | semiring sweeps: SAT, counting, WMC, log-WMC, MPE |
+| `dnnf.kbest` | lazy ordered model enumeration |
+| `dnnf.torch_backend` | layered batched tensor evaluation, marginals |
+| `dnnf.diagnosis` | `SystemModel` / ranked diagnoses / posteriors |
+| `dnnf.nnf_io` | c2d `.nnf` interop |
+
+## Tests
+
+```bash
+python -m pytest
+```
+
+All evaluators, the compiler, enumeration, the torch backend, and the
+diagnosis layer are cross-validated against brute-force model enumeration
+on randomized instances.

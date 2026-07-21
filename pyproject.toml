@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dnnf-lib"
+version = "0.1.0"
+description = "Decomposable Negation Normal Form (DNNF) compilation, weighted inference, and diagnosis, with optional PyTorch GPU evaluation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Alan Oursland" }]
+keywords = [
+    "dnnf",
+    "knowledge-compilation",
+    "model-counting",
+    "sat",
+    "diagnosis",
+    "probabilistic-circuits",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+torch = ["torch>=2.0"]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["dnnf*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
