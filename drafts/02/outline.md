@@ -62,11 +62,13 @@ the library has more features than this paper mentions.
   Barrett 2005, Helwig et al. (hydraulic dataset), D4, dsharp, PC
   survey; ~15 entries.
 
-## Figures (3 total, all regenerable)
+## Figures (3 total; source and rendered PNG live together in
+`fig_src/`, one script per figure)
 
-1. lifecycle ring (`tutorial/images/00a_lifecycle.png`, restyled)
-2. tracked-month belief timeline (from `case_study.py`)
-3. real-data calibration bars (from `real_data_study.py`)
+1. `fig_src/fig1_lifecycle.py` -> fig1_lifecycle.png (§2)
+2. `fig_src/fig2_belief_timeline.py` -> fig2_belief_timeline.png (§5)
+3. `fig_src/fig3_calibration.py` -> fig3_calibration.png (§6;
+   requires the dataset at /tmp/hydraulic, see real_data_study.py)
 
 ## Length budget check
 
