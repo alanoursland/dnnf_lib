@@ -83,16 +83,14 @@ Related work: Darwiche's DNNF/differential-semantics line, dsharp/D4
 compilers, probabilistic circuits, DeepProbLog/semantic-loss
 neurosymbolics, Livingstone-era mode estimation.
 
-## What is missing for the workshop version
+## Status of the previously missing pieces
 
-- A worked end-to-end case study section (the home-battery or process
-  line examples suffice at workshop scale).
-- Honest limitations section (drafted content exists across
-  `docs/SCALE.md`, `docs/MODELING_NOTES.md`: pure-Python compile
-  constants, beam approximation, model misspecification risk).
-
-## What is missing for a journal version
-
-- One *real* system with real telemetry (not sampled from the model) —
-  the calibration/misspecification story must be faced on real data.
-- Comparison against an external compiler (d4) on the same models.
+- End-to-end case study: DONE — `drafts/02/case_study.md` (+ .py).
+- Honest limitations: DONE — `drafts/02/limitations.md` (11 items).
+- Real telemetry: PARTIALLY DONE — `drafts/02/real_data_study.md`
+  (UCI hydraulic rig, 2,205 real cycles; calibration measured:
+  confident calls perfect, mid-range overconfident 2-3x). Open: real
+  sequences/tracking and rate learning on real data.
+- External compiler: DONE — `drafts/02/d4_comparison.md` (counts
+  match; d4 4-6x faster, up to 4.3x smaller circuits; conclusion:
+  reference implementation + interop, not a compiler race).
