@@ -9,7 +9,7 @@ loop: compile once offline, then answer observation queries online.
 Run:  python examples/valve_diagnosis.py
 """
 
-from dnnf import SystemModel, iff
+from neximode import SystemModel, iff
 
 m = SystemModel()
 

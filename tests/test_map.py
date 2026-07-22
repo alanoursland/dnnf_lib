@@ -6,8 +6,8 @@ from collections import defaultdict
 
 import pytest
 
-from dnnf import SystemModel, compile_cnf, enumerate_map, iff
-from dnnf.circuit import lit_index
+from neximode import SystemModel, compile_cnf, enumerate_map, iff
+from neximode.circuit import lit_index
 from helpers import assignment_weight, random_cnf, random_weights
 
 

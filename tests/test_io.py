@@ -1,6 +1,6 @@
 import random
 
-from dnnf import CNF, compile_cnf, model_count, nnf_io
+from neximode import CNF, compile_cnf, model_count, nnf_io
 from helpers import random_cnf
 
 

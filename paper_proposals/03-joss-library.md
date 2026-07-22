@@ -1,4 +1,4 @@
-# Proposal 3: dnnf_lib software paper (JOSS)
+# Proposal 3: neximode software paper (JOSS)
 
 **Form**: short software paper (`paper.md` + metadata per JOSS format).
 **Venue**: Journal of Open Source Software. **Purpose**: peer-reviewed,
@@ -12,7 +12,7 @@ Existing open-source tooling covers fragments of the compiled-reasoning
 stack: d-DNNF compilers without query/learning layers (c2d, dsharp,
 D4), SDD/BDD packages without diagnosis semantics (PySDD, dd),
 probabilistic-circuit learners without logical modeling front ends
-(SPFlow, PyJuice). dnnf_lib integrates the full lifecycle behind one
+(SPFlow, PyJuice). neximode integrates the full lifecycle behind one
 representation: a finite-domain modeling DSL (modes with priors, noisy
 sensors, quantized continuous ranges), a native multi-valued
 decision-DNNF compiler, exact queries (WMC, MPE, marginal MAP, ordered

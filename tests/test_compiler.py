@@ -2,7 +2,7 @@ import random
 
 import pytest
 
-from dnnf import CNF, compile_cnf, is_satisfiable, model_count
+from neximode import CNF, compile_cnf, is_satisfiable, model_count
 from helpers import random_cnf
 
 

@@ -18,7 +18,7 @@ This is an exhaustive DPLL trace compiler in the style of c2d / dsharp / D4:
   heuristics approach used in the JPL model-based diagnosis compiler.
 
 The output is a decision-DNNF: decomposable and deterministic, suitable for
-weighted model counting after :meth:`dnnf.circuit.Circuit.smooth`.
+weighted model counting after :meth:`neximode.circuit.Circuit.smooth`.
 """
 
 from __future__ import annotations

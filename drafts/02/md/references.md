@@ -39,6 +39,6 @@
   Systems.* Morgan Kaufmann, 1988.
 - **[WilliamsNayak1996]** B. C. Williams, P. P. Nayak. *A Model-Based
   Approach to Reactive Self-Configuring Systems.* AAAI 1996.
-- **[dnnf_lib]** The dnnf_lib library: code, tests, benchmark and
+- **[neximode]** The neximode library: code, tests, benchmark and
   study scripts for every number in this paper.
   github.com/alanoursland/dnnf_lib.

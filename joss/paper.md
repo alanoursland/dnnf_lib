@@ -1,5 +1,5 @@
 ---
-title: 'dnnf_lib: compiled DNNF reasoning, model-based diagnosis, and learning on one circuit'
+title: 'neximode: compiled DNNF reasoning, model-based diagnosis, and learning on one circuit'
 tags:
   - Python
   - knowledge compilation
@@ -19,7 +19,7 @@ bibliography: paper.bib
 
 # Summary
 
-`dnnf_lib` compiles finite-domain constraint theories into smooth
+`neximode` compiles finite-domain constraint theories into smooth
 deterministic decomposable negation normal form (d-DNNF) circuits
 [@darwiche2001; @darwiche2002map] and answers probabilistic queries on
 the compiled artifact in time linear in its size. Queries are semiring
@@ -50,7 +50,7 @@ decision-diagram packages without diagnosis semantics, and
 probabilistic-circuit learners without logical modeling front ends
 [@peharz2020; @choi2020]. Neurosymbolic systems that train networks
 through weighted model counting [@xu2018; @manhaeve2018] target logic
-programming rather than system-model diagnosis. `dnnf_lib` integrates
+programming rather than system-model diagnosis. `neximode` integrates
 the full lifecycle — model, compile, simulate, monitor, diagnose,
 learn — behind one representation, in pure Python with an optional
 torch extra, and cross-validates every inference path against
@@ -66,22 +66,22 @@ machine precision.
 
 # Functionality overview
 
-- `dnnf.fd`: finite-domain CNF, native d-way decision-DNNF compiler
+- `neximode.fd`: finite-domain CNF, native d-way decision-DNNF compiler
   (unit propagation, component decomposition, caching; iterative core),
   semiring queries, enumeration, marginal MAP, sampling, smoothing.
-- `dnnf.diagnosis`: `SystemModel` DSL (modes, sensors with
+- `neximode.diagnosis`: `SystemModel` DSL (modes, sensors with
   false-positive/negative rates, quantized ranges with threshold
   atoms), ranked and minimum-cardinality diagnoses, exact posteriors,
   value-of-information sensor ranking, EM prior learning.
-- `dnnf.tracking`: beam-filtered belief over joint mode assignments,
+- `neximode.tracking`: beam-filtered belief over joint mode assignments,
   exact HMM filtering when the beam covers the space; transition
   matrices, per-step overrides, previous-state-dependent rates, and
   compiled joint transition constraints.
-- `dnnf.torch_backend` / `dnnf.torch_learn`: layered batched
+- `neximode.torch_backend` / `neximode.torch_learn`: layered batched
   evaluation (log-probability and tropical semirings), autograd
   marginals, batched MPE, gradient prior learning, neural observation
   model training.
-- `dnnf.cnf` / `dnnf.nnf_io` / `dnnf.external`: DIMACS and c2d `.nnf`
+- `neximode.cnf` / `neximode.nnf_io` / `neximode.external`: DIMACS and c2d `.nnf`
   interop, external compiler driver.
 
 Benchmarks (`bench/`) include a scale study: circuit size grows

@@ -4,9 +4,9 @@ import math
 
 import pytest
 
-from dnnf import SystemModel, iff
-from dnnf.diagnosis import CompiledSystem
-from dnnf.planning import Planner
+from neximode import SystemModel, iff
+from neximode.diagnosis import CompiledSystem
+from neximode.planning import Planner
 
 
 def test_save_load_round_trip(tmp_path):

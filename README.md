@@ -1,4 +1,4 @@
-# dnnf_lib
+# neximode
 
 Compilation of propositional theories to **Decomposable Negation Normal
 Form (DNNF)**, tractable weighted reasoning on the compiled circuits, and
@@ -26,31 +26,31 @@ pip install -e .[dev]       # + pytest
 ## Quick start: compile and query
 
 ```python
-import dnnf
+import neximode
 
-cnf = dnnf.CNF(num_vars=3, clauses=[(1, 2), (-1, 3)])
-circuit = dnnf.compile_cnf(cnf, smooth=True)   # decision-DNNF: decomposable,
-                                               # deterministic, smooth
-dnnf.model_count(circuit)                      # 4
-dnnf.wmc(circuit, dnnf.weights_from_probs(3, {1: 0.9, 2: 0.5, 3: 0.5}))
+cnf = neximode.CNF(num_vars=3, clauses=[(1, 2), (-1, 3)])
+circuit = neximode.compile_cnf(cnf, smooth=True)   # decision-DNNF: decomposable,
+                                                   # deterministic, smooth
+neximode.model_count(circuit)                      # 4
+neximode.wmc(circuit, neximode.weights_from_probs(3, {1: 0.9, 2: 0.5, 3: 0.5}))
 
 # MPE / most probable model under neg-log costs
-costs = dnnf.costs_from_probs(3, {1: 0.9, 2: 0.5, 3: 0.5})
-cost, best = dnnf.mpe(circuit, costs)
+costs = neximode.costs_from_probs(3, {1: 0.9, 2: 0.5, 3: 0.5})
+cost, best = neximode.mpe(circuit, costs)
 
 # Models ordered most-probable-first (lazy k-best)
-for cost, model in dnnf.enumerate_models(circuit, costs, k=5):
+for cost, model in neximode.enumerate_models(circuit, costs, k=5):
     print(cost, model)
 ```
 
-DIMACS CNF (`dnnf.CNF.from_dimacs`) and the c2d `.nnf` circuit format
-(`dnnf.nnf_io`) are supported, so circuits from external compilers
+DIMACS CNF (`neximode.CNF.from_dimacs`) and the c2d `.nnf` circuit format
+(`neximode.nnf_io`) are supported, so circuits from external compilers
 (c2d, dsharp, D4) plug into the same evaluators.
 
 ## Diagnosis: modes, priors, ranked explanations
 
 ```python
-from dnnf import SystemModel, iff
+from neximode import SystemModel, iff
 
 m = SystemModel()
 v1 = m.mode("valve1", ("ok", "stuck_open", "stuck_closed"), priors=(0.98, 0.01, 0.01))
@@ -72,7 +72,7 @@ during compilation (`modes_first=True`, the default), which constrains the
 circuit so that max-over-modes / sum-over-everything-else is a single
 sweep plus lazy k-best enumeration.
 
-The diagnosis stack runs on a **native finite-domain core** (`dnnf.fd`):
+The diagnosis stack runs on a **native finite-domain core** (`neximode.fd`):
 variables carry their domains directly, circuit leaves are atomic
 assignments like `valve1=stuck_closed`, and decision nodes branch d-ways —
 no one-hot encoding, no exactly-one clauses, ~40% smaller circuits on
@@ -103,7 +103,7 @@ likelihood — failure priors estimated from fleet data instead of
 engineering guesses, with the logical model as a hard constraint.
 
 Sensors can be noisy (`m.sensor("alarm", expr, false_positive=0.1,
-false_negative=0.2)`), and `dnnf.ModeTracker` runs the monitoring loop:
+false_negative=0.2)`), and `neximode.ModeTracker` runs the monitoring loop:
 per-mode transition matrices, observations each timestep, and a
 beam-filtered belief over joint mode assignments (exact HMM filtering when
 the beam covers the mode space — see `examples/home_battery.py` for a
@@ -114,7 +114,7 @@ ergonomics findings from that experiment).
 
 ```python
 import torch
-from dnnf.torch_backend import TorchCircuit
+from neximode.torch_backend import TorchCircuit
 
 tc = TorchCircuit(circuit, semiring="logprob", device="cuda")
 w = tc.weights_from_probs({1: 0.9}, batch=1024)   # (B, 2n) log-weights
@@ -135,17 +135,17 @@ producing leaf weights, trained end-to-end through exact inference.
 
 | Module | Contents |
 |---|---|
-| `dnnf.cnf` | CNF container, DIMACS I/O |
-| `dnnf.formula` | propositional AST, Tseitin encoding |
-| `dnnf.compiler` | CNF → decision-DNNF (DPLL + components + caching) |
-| `dnnf.circuit` | circuit arrays, property checks, smooth/condition |
-| `dnnf.eval` | semiring sweeps: SAT, counting, WMC, log-WMC, MPE |
-| `dnnf.kbest` | lazy ordered model enumeration |
-| `dnnf.torch_backend` | layered batched tensor evaluation, marginals |
-| `dnnf.fd` | native finite-domain core: FD-CNF, compiler, queries, MAP |
-| `dnnf.diagnosis` | `SystemModel` / ranked diagnoses / posteriors / quantized vars |
-| `dnnf.tracking` | `ModeTracker` temporal filtering |
-| `dnnf.nnf_io` | c2d `.nnf` interop |
+| `neximode.cnf` | CNF container, DIMACS I/O |
+| `neximode.formula` | propositional AST, Tseitin encoding |
+| `neximode.compiler` | CNF → decision-DNNF (DPLL + components + caching) |
+| `neximode.circuit` | circuit arrays, property checks, smooth/condition |
+| `neximode.eval` | semiring sweeps: SAT, counting, WMC, log-WMC, MPE |
+| `neximode.kbest` | lazy ordered model enumeration |
+| `neximode.torch_backend` | layered batched tensor evaluation, marginals |
+| `neximode.fd` | native finite-domain core: FD-CNF, compiler, queries, MAP |
+| `neximode.diagnosis` | `SystemModel` / ranked diagnoses / posteriors / quantized vars |
+| `neximode.tracking` | `ModeTracker` temporal filtering |
+| `neximode.nnf_io` | c2d `.nnf` interop |
 
 ## Tests
 

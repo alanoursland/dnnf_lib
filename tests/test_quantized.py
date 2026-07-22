@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from dnnf import SystemModel
+from neximode import SystemModel
 
 
 def build_tank():

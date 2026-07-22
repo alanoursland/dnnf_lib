@@ -4,7 +4,7 @@ Two utilities used by the tutorial's generated figures and handy for
 debugging small circuits:
 
 * :func:`circuit_to_dot` — emit Graphviz DOT text for an
-  :class:`dnnf.fd.FDCircuit` (render with any dot tool, or just read it).
+  :class:`neximode.fd.FDCircuit` (render with any dot tool, or just read it).
 * :func:`layered_layout` — pure-Python (x, y) positions, one row per
   depth layer, for plotting with matplotlib without graphviz installed.
 
@@ -45,7 +45,7 @@ def circuit_to_dot(
     node_values: Optional[Sequence] = None,
 ) -> str:
     """Graphviz DOT for an FD circuit; ``node_values`` (e.g. a semiring
-    sweep from :func:`dnnf.fd.log_values`) annotates every node."""
+    sweep from :func:`neximode.fd.log_values`) annotates every node."""
     lines = [
         "digraph circuit {",
         "  rankdir=BT;",

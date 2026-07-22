@@ -6,7 +6,7 @@ from collections import defaultdict
 
 import pytest
 
-from dnnf import fd
+from neximode import fd
 
 
 def random_fd_cnf(rng, num_vars, num_clauses):
@@ -114,7 +114,7 @@ def test_fd_enumerate_map_matches_brute_force(seed):
 
 def test_fd_encode_formula():
     """iff/xor over FD atoms round-trip through Tseitin correctly."""
-    from dnnf.formula import iff
+    from neximode.formula import iff
 
     cnf = fd.FDCnf()
     x = cnf.spec.add_var(3)  # domain {0,1,2}

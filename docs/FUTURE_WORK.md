@@ -71,7 +71,7 @@ leverage:
 
 - **Marginal MAP over modes.** ✅ *Done:* `SystemModel.compile()` now
   branches mode variables first by default, the constrained structure is
-  verified, and `CompiledSystem.map_diagnoses()` / `dnnf.enumerate_map()`
+  verified, and `CompiledSystem.map_diagnoses()` / `neximode.enumerate_map()`
   return joint mode assignments ranked by exact summed posterior (lazy
   k-best over the mode region with log-sum-exp values as terminal costs).
   Remaining refinement: constrained *dtree* construction so the modes-first
@@ -135,7 +135,7 @@ diagnosis: the compiled circuit is an exact, differentiable likelihood.
   (posterior WMC ratios as the E-step), verified to recover known failure
   rates from alarm-only observations; `sample_state()` provides exact
   model sampling for simulation and synthetic data. ✅ *Gradient path
-  done too:* `dnnf.torch_learn.PriorLearner` /
+  done too:* `neximode.torch_learn.PriorLearner` /
   `CompiledSystem.fit_priors_torch` train the same priors by Adam on the
   differentiable backend (batched masked log-WMC over deduplicated
   evidence patterns), verified to match EM and the analytic MLE.
@@ -156,7 +156,7 @@ diagnosis: the compiled circuit is an exact, differentiable likelihood.
 ## Horizon 5 — Blue sky (research-grade)
 
 - **Temporal diagnosis / mode tracking.** ✅ *First version done:*
-  `dnnf.ModeTracker` maintains a beam-filtered belief over joint mode
+  `neximode.ModeTracker` maintains a beam-filtered belief over joint mode
   assignments with per-variable transition matrices, exact HMM filtering
   when the beam covers the mode space (verified against a hand-rolled
   forward recursion). Zero-probability transitions, per-step

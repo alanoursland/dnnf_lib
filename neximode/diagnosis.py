@@ -16,7 +16,7 @@ assignments like ``valve=stuck_closed`` — and then queried online:
 Weights live directly on ``(variable, value)`` leaves: a mode's prior is
 the weight of its value, evidence masks the weights of ruled-out values,
 and Tseitin auxiliaries are neutral.  There is no one-hot encoding and no
-exactly-one clauses — finite domains are native (see :mod:`dnnf.fd`).
+exactly-one clauses — finite domains are native (see :mod:`neximode.fd`).
 """
 
 from __future__ import annotations
@@ -233,7 +233,7 @@ class SystemModel:
             m.add(~((m.prev("a") == "ok") & (m.prev("b") == "ok")
                     & (a == "bad") & (b == "bad")))   # no common-cause pair failure
 
-        During tracking, :class:`dnnf.tracking.ModeTracker` conditions
+        During tracking, :class:`neximode.tracking.ModeTracker` conditions
         the prev variables to each belief particle's modes, so these
         constraints prune illegal transitions (pruned mass is
         renormalized: probabilities are conditional on a legal
@@ -467,7 +467,7 @@ class CompiledSystem:
     ) -> List[Tuple[float, Dict[str, str]]]:
         """Ranked joint mode assignments under explicit log weights:
         ``(cost, {mode_var: value})``.  Building block for
-        :meth:`map_diagnoses` and :class:`dnnf.tracking.ModeTracker`."""
+        :meth:`map_diagnoses` and :class:`neximode.tracking.ModeTracker`."""
         map_fd_vars = [self.vars[n].fd_var for n in self.mode_vars]
         by_fd = {self.vars[n].fd_var: n for n in self.mode_vars}
         out: List[Tuple[float, Dict[str, str]]] = []
@@ -696,7 +696,7 @@ class CompiledSystem:
 
         c = self.circuit
         doc = {
-            "format": "dnnf_lib.compiled_system.v1",
+            "format": "neximode.compiled_system.v1",
             # All resource requirements up front, flight-software style:
             # a loader can make one allocation pass from the header alone
             # before reading any body section (the original spacecraft
@@ -740,7 +740,7 @@ class CompiledSystem:
 
         with open(path) as f:
             doc = json.load(f)
-        if doc.get("format") != "dnnf_lib.compiled_system.v1":
+        if doc.get("format") != "neximode.compiled_system.v1":
             raise ValueError(f"unrecognized format in {path}")
         spec = fd.FDSpec()
         for size in doc["spec_sizes"]:

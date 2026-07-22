@@ -1,4 +1,4 @@
-# Tutorial plan: *Compiled Reasoning with dnnf_lib*
+# Tutorial plan: *Compiled Reasoning with neximode*
 
 **Audience**: a CS undergraduate who knows Python, basic propositional
 logic, and intro probability. No SAT, no graphical models, no ML
@@ -199,7 +199,7 @@ large fonts (readable at textbook width), no chartjunk.
 | 01b | `explosion.png` | 2^n curve, log scale, annotations | matplotlib |
 | 02a | `tree_vs_dag.png` | decision tree vs cached DAG, same formula | networkx, two panels |
 | 02b | `two_properties.png` | annotated AND/OR gate close-ups | matplotlib patches |
-| 02c | `first_circuit.png` | real compiled fragment (≤25 nodes) | render FDCircuit via graphviz (small helper to write DOT — *needs a `circuit_to_dot` utility, add to `dnnf/viz.py`*) |
+| 02c | `first_circuit.png` | real compiled fragment (≤25 nodes) | render FDCircuit via graphviz (small helper to write DOT — *needs a `circuit_to_dot` utility, add to `neximode/viz.py`*) |
 | 03a | `code_to_clauses.png` | add() calls → clauses mapping | matplotlib annotations |
 | 04a | `three_sweeps.png` | one circuit, three semiring evaluations, wire values | graphviz ×3 panels |
 | 04b | `neglog_line.png` | −log p number line | matplotlib |
@@ -212,13 +212,13 @@ large fonts (readable at textbook width), no chartjunk.
 | 07b | `belief_timeline.png` | 30-day stacked-area belief | run tracker |
 | 08a/b, 09a/b, 10a/b, 11a/b, 12a | as described above | mixed |
 
-New library utility required: **`dnnf/viz.py`** with
+New library utility required: **`neximode/viz.py`** with
 `circuit_to_dot(circuit, labels=...)` (used by images 02c, 04a, 09a and
 generally useful — should ship with tests like everything else).
 
 ## Production order and effort
 
-1. `dnnf/viz.py` + image generator skeleton (half day).
+1. `neximode/viz.py` + image generator skeleton (half day).
 2. Chapters 00–04 (the theory core; most images; ~2 sessions).
 3. Chapters 05–09 (library tour on the greenhouse; ~2 sessions).
 4. Chapters 10–12 + appendices (~1 session).

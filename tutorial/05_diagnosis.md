@@ -13,7 +13,7 @@
 ![greenhouse](images/05a_greenhouse.png)
 
 ```python
-from dnnf import SystemModel, iff
+from neximode import SystemModel, iff
 
 m = SystemModel()
 pump = m.mode("pump", ("ok", "weak", "dead"), priors=(0.45, 0.52, 0.03))

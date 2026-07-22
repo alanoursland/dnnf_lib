@@ -1,6 +1,6 @@
 # Lab report: Implicit EM in compiled circuits
 
-**Date**: 2026-07-21 · **System**: dnnf_lib (branch
+**Date**: 2026-07-21 · **System**: neximode (branch
 `claude/dnnf-logic-library-3nb814`) · **Test module**:
 `tests/test_implicit_em.py` (all experiments run in CI) · **Reference**:
 Oursland, *Gradient Descent as Implicit EM*
@@ -20,10 +20,10 @@ clamped observation) produces the predicted degeneracies.
 
 ## Apparatus
 
-- Compiled finite-domain d-DNNF circuits (`dnnf.fd`); exact reference
+- Compiled finite-domain d-DNNF circuits (`neximode.fd`); exact reference
   posteriors by weighted-model-count ratios (`CompiledSystem.posteriors`),
   themselves validated elsewhere against exhaustive enumeration.
-- Differentiable evaluator (`dnnf.torch_backend.TorchCircuit`,
+- Differentiable evaluator (`neximode.torch_backend.TorchCircuit`,
   log-prob semiring, float64): gradients via one backward pass.
 - Learners: exact EM (`fit_priors`) and Adam SGD with softmax
   reparameterization (`fit_priors_torch`).

@@ -16,7 +16,7 @@ import pytest
 TUTORIAL = os.path.join(os.path.dirname(__file__), "..", "tutorial")
 
 CH3_MODEL = """
-from dnnf import SystemModel, iff, fd
+from neximode import SystemModel, iff, fd
 m = SystemModel()
 pump = m.mode("pump", ("ok", "weak", "dead"), priors=(0.90, 0.07, 0.03))
 drip = m.bool("drip")

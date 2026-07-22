@@ -32,7 +32,7 @@ import math
 
 import pytest
 
-from dnnf import SystemModel, fd, iff
+from neximode import SystemModel, fd, iff
 
 LEVELS = ("zero", "between", "full")
 DIRS = ("dec", "std", "inc")

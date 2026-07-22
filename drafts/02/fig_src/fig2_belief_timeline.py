@@ -7,7 +7,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from case_study import build, TRANS  # noqa: E402
-from dnnf import ModeTracker
+from neximode import ModeTracker
 
 OUT = os.path.dirname(os.path.abspath(__file__))
 plt.rcParams.update({"font.size": 11, "figure.dpi": 200})

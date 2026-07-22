@@ -4,8 +4,8 @@ import math
 
 import pytest
 
-from dnnf.formula import iff
-from dnnf.planning import Planner
+from neximode.formula import iff
+from neximode.planning import Planner
 
 
 def siderostat(horizon=2):

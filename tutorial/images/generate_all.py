@@ -2,7 +2,7 @@
 
 Every figure is produced from code (mostly from the library itself) so
 the images regenerate when the library changes. Matplotlib only — no
-graphviz binary required (layouts come from dnnf.viz.layered_layout).
+graphviz binary required (layouts come from neximode.viz.layered_layout).
 """
 
 import math
@@ -18,9 +18,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse, FancyArrowPatch, Rectangle
 
-from dnnf import SystemModel, fd, iff
-from dnnf.circuit import AND, LIT, OR
-from dnnf.viz import layered_layout, node_label
+from neximode import SystemModel, fd, iff
+from neximode.circuit import AND, LIT, OR
+from neximode.viz import layered_layout, node_label
 
 OUT = os.path.dirname(os.path.abspath(__file__))
 plt.rcParams.update({"font.size": 12, "figure.dpi": 130})
@@ -177,7 +177,7 @@ def img_04a(system):
     # counting sweep
     ones = [1.0] * c.spec.total
     count_vals = []
-    from dnnf.eval import _forward
+    from neximode.eval import _forward
     count_vals = _forward(c, lambda ml: 1, lambda a, b: a + b,
                           lambda a, b: a * b, 0, 1)
     # probability sweep (priors; observables uniform 0.5 for readability)

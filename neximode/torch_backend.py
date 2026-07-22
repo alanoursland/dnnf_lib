@@ -23,7 +23,7 @@ Two semirings are provided:
   is the MPE cost, and ``.mpe(w)`` decodes the minimizing assignments.
 
 Import this module only when torch is installed (``pip install
-dnnf-lib[torch]``).
+neximode[torch]``).
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ class TorchCircuit:
         self.device = torch.device(device)
         self.dtype = dtype
         # Boolean circuits index weights by lit_index (length 2n); FD
-        # circuits (dnnf.fd.FDCircuit) provide their own dense leaf
+        # circuits (neximode.fd.FDCircuit) provide their own dense leaf
         # indexing (length spec.total) via duck-typed hooks.
         self._leaf_index = getattr(circuit, "leaf_index", lit_index)
         self._is_fd = hasattr(circuit, "spec")
@@ -239,7 +239,7 @@ class TorchCircuit:
         """Evaluate the circuit.
 
         ``weights``: tensor of shape ``(B, 2 * num_vars)`` (or ``(2n,)``,
-        auto-promoted), indexed by :func:`dnnf.circuit.lit_index` — log
+        auto-promoted), indexed by :func:`neximode.circuit.lit_index` — log
         literal weights for ``"logprob"``, additive costs for ``"neglog"``.
 
         Returns the root value per batch element, shape ``(B,)`` — or, with

@@ -213,10 +213,10 @@ def enumerate_models(
     cost order (all models when ``k`` is None).
 
     ``costs`` is a per-literal additive cost vector (index via
-    :func:`dnnf.circuit.lit_index`); use neg-log probabilities to get
+    :func:`neximode.circuit.lit_index`); use neg-log probabilities to get
     most-probable-first enumeration.  Models with infinite cost (e.g. those
     contradicting evidence applied via
-    :func:`dnnf.eval.condition_weights`) are suppressed.
+    :func:`neximode.eval.condition_weights`) are suppressed.
 
     The circuit is smoothed automatically if needed so every yielded model
     assigns every variable.

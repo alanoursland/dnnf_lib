@@ -6,8 +6,8 @@ Produces every number quoted in case_study.md. Run:
 import math, os, random, sys, time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from dnnf import ModeTracker, SystemModel, iff
-from dnnf.diagnosis import CompiledSystem
+from neximode import ModeTracker, SystemModel, iff
+from neximode.diagnosis import CompiledSystem
 
 
 def build(battery_priors=(0.94, 0.05, 0.01)):

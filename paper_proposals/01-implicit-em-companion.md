@@ -61,7 +61,7 @@ out-of-sample confirmations rather than constructed illustrations.
    = the clamping term). A theorem whose preconditions are
    rediscovered by breaking things is doing explanatory work.
 
-## Claims → existing evidence (all machine-checked, in dnnf_lib)
+## Claims → existing evidence (all machine-checked, in neximode)
 
 | Claim | Evidence |
 |---|---|

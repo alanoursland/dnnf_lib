@@ -13,7 +13,7 @@ import math
 
 import pytest
 
-from dnnf import ModeTracker, SystemModel, iff, xor
+from neximode import ModeTracker, SystemModel, iff, xor
 
 P_GLITCH = 0.1
 PRIOR_BAD = 0.01

@@ -4,7 +4,7 @@ import shutil
 
 import pytest
 
-from dnnf import CNF, SystemModel, iff
+from neximode import CNF, SystemModel, iff
 
 
 def build_two_valve():
@@ -57,7 +57,7 @@ def test_voi_zero_when_nothing_to_learn():
 
 
 def test_c2d_driver_missing_binary_raises():
-    from dnnf.external import compile_with_c2d
+    from neximode.external import compile_with_c2d
 
     if shutil.which("c2d"):
         pytest.skip("c2d installed; covered by round-trip below")
@@ -67,8 +67,8 @@ def test_c2d_driver_missing_binary_raises():
 
 @pytest.mark.skipif(shutil.which("c2d") is None, reason="c2d not installed")
 def test_c2d_round_trip():  # pragma: no cover - environment-dependent
-    from dnnf import model_count
-    from dnnf.external import compile_with_c2d
+    from neximode import model_count
+    from neximode.external import compile_with_c2d
 
     cnf = CNF(num_vars=3, clauses=[(1, 2), (-1, 3)])
     circuit = compile_with_c2d(cnf).smooth()

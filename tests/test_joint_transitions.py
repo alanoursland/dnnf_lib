@@ -2,7 +2,7 @@
 
 import pytest
 
-from dnnf import ModeTracker, SystemModel
+from neximode import ModeTracker, SystemModel
 
 FAIL = 0.2
 ABSORBING = {

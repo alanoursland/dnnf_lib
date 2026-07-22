@@ -19,7 +19,7 @@ never observing the hidden modes directly.
 
 ```python
 import random
-from dnnf import SystemModel
+from neximode import SystemModel
 
 def build(p_leaky):
     m = SystemModel()

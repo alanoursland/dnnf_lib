@@ -1,7 +1,7 @@
 """Chapter 8 exercise solutions (ex. 1: the loop, one turn)."""
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from dnnf import SystemModel, iff
+from neximode import SystemModel, iff
 
 
 def build():

@@ -16,7 +16,7 @@ not resurrect. That's a probabilistic statement about *pairs of
 consecutive days*, written as a transition matrix per mode variable:
 
 ```python
-from dnnf import ModeTracker, SystemModel
+from neximode import ModeTracker, SystemModel
 
 m = SystemModel()
 pump = m.mode("pump", ("ok", "weak", "dead"), priors=(1.0, 0.0, 0.0))

@@ -3,7 +3,7 @@ import random
 
 import pytest
 
-from dnnf import (
+from neximode import (
     CNF,
     compile_cnf,
     condition_weights,

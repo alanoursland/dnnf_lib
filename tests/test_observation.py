@@ -5,7 +5,7 @@ import random
 
 import pytest
 
-from dnnf import SystemModel, iff
+from neximode import SystemModel, iff
 
 
 def build():
@@ -31,7 +31,7 @@ def test_soft_evidence_posterior():
 def test_soft_evidence_in_mpe_costs():
     sys = build()
     costs = sys._conditioned_costs({"flow": (0.9, 0.1)})
-    import dnnf.fd as fd
+    import neximode.fd as fd
 
     cost, best = fd.mpe(sys.circuit, costs)
     # ok path: cost -log(.7) - log(.1); bad path: -log(.3) - log(.9)
@@ -42,7 +42,7 @@ def test_soft_evidence_in_mpe_costs():
 
 def test_observation_trainer_learns_without_labels():
     torch = pytest.importorskip("torch")
-    from dnnf.torch_learn import ObservationTrainer
+    from neximode.torch_learn import ObservationTrainer
 
     # Grounded setup: alarm (hard-observed, iff v=bad) anchors the
     # hidden state; the net reads raw x for flow (iff v=ok).  Flow is

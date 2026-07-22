@@ -88,7 +88,7 @@ Numerics and intuition:
 ![neglog line](images/04b_neglog_line.png)
 
 ```python
-from dnnf import fd
+from neximode import fd
 import math
 
 # min-sum sweep by hand: costs from the system's own weights

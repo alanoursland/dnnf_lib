@@ -21,7 +21,7 @@ circuit so every model assigns every variable.
 The neg-log view is the one used in model-based diagnosis: give literal
 ``l`` the weight ``-log P(l)``; then the min-sum value of the circuit is
 the cost of the most probable model consistent with the theory, and k-best
-enumeration (see :mod:`dnnf.kbest`) yields models ordered from most to
+enumeration (see :mod:`neximode.kbest`) yields models ordered from most to
 least probable.
 """
 
@@ -232,7 +232,7 @@ def mpe(
 
 # ----------------------------------------------------------------------
 def _require_smooth_ddnnf(circuit: Circuit) -> None:
-    # Cheap cached validation; users compiling through dnnf.compile_cnf
+    # Cheap cached validation; users compiling through neximode.compile_cnf
     # always pass.  Re-verifying properties on every call would be O(n^2)
     # for determinism, so we only check smoothness structure lazily.
     cache = getattr(circuit, "_smooth_ddnnf_ok", None)

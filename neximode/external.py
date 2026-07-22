@@ -2,7 +2,7 @@
 
 For instances beyond the pure-Python compilers, shell out to an
 installed industrial compiler and load its output through
-:mod:`dnnf.nnf_io`.  Currently supported: **c2d** (Darwiche), whose
+:mod:`neximode.nnf_io`.  Currently supported: **c2d** (Darwiche), whose
 output is the `.nnf` format we already parse.  A D4 driver requires a
 parser for its arc-based output format and is left as future work.
 """

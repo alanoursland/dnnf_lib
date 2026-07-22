@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from dnnf import SystemModel, iff
+from neximode import SystemModel, iff
 
 
 def build_two_valve_system():

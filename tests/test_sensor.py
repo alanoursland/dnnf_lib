@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from dnnf import SystemModel
+from neximode import SystemModel
 
 P_BAD = 0.01
 FP = 0.1

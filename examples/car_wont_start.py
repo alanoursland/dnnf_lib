@@ -4,7 +4,7 @@ Shows finite-domain observables (headlights are off/dim/bright, not a
 boolean) and mixed-domain modes.  Run: python examples/car_wont_start.py
 """
 
-from dnnf import SystemModel, iff
+from neximode import SystemModel, iff
 
 m = SystemModel()
 

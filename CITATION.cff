@@ -1,6 +1,6 @@
 cff-version: 1.2.0
-message: "If you use dnnf_lib, please cite it."
-title: "dnnf_lib: compiled DNNF reasoning, diagnosis, and learning"
+message: "If you use neximode, please cite it."
+title: "neximode: compiled DNNF reasoning, diagnosis, and learning"
 authors:
   - family-names: Oursland
     given-names: Alan

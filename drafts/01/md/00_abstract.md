@@ -24,4 +24,4 @@ developers, and were cured by restoring exactly the named conditions.
 As a corollary, Darwiche's differential semantics of d-DNNF is Fisher's
 identity applied recursively, connecting the implicit-EM thesis to the
 knowledge compilation literature. All experiments are machine-checked
-in the open-source library dnnf_lib.
+in the open-source library neximode.

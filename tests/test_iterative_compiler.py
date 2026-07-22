@@ -2,7 +2,7 @@
 
 import sys
 
-from dnnf import fd
+from neximode import fd
 
 
 def test_deep_chain_compiles_under_tiny_recursion_limit():

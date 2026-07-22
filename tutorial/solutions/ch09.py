@@ -1,7 +1,7 @@
 """Chapter 9 exercise solutions (ex. 1 and 2)."""
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from dnnf import Planner
+from neximode import Planner
 
 # Ex 1: Safe reachable only from Idling.
 p = Planner()

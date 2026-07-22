@@ -7,8 +7,8 @@ import random
 from itertools import product
 from typing import Dict, List, Sequence, Tuple
 
-from dnnf.circuit import lit_index
-from dnnf.cnf import CNF
+from neximode.circuit import lit_index
+from neximode.cnf import CNF
 
 
 def random_cnf(rng: random.Random, num_vars: int, num_clauses: int) -> CNF:

@@ -40,7 +40,7 @@
   a Continuous Space.* CoNLL, 2016. (Posterior collapse.)
 - **[Bishop2006]** C. M. Bishop. *Pattern Recognition and Machine
   Learning.* Springer, 2006. (Mixture likelihood singularities.)
-- **[dnnf_lib]** The dnnf_lib library and experiment suite.
+- **[neximode]** The neximode library and experiment suite.
   github.com/alanoursland/dnnf_lib (tests/test_implicit_em.py;
   reports/implicit_em_lab_report.md).
 

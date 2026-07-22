@@ -1,24 +1,24 @@
-"""dnnf: compilation of propositional theories to Decomposable Negation
+"""neximode: compilation of propositional theories to Decomposable Negation
 Normal Form, tractable weighted reasoning, ordered model enumeration, and
 model-based diagnosis — with an optional PyTorch backend for batched
 GPU evaluation.
 
 Typical offline/online split::
 
-    import dnnf
+    import neximode
 
-    cnf = dnnf.CNF.from_dimacs("theory.cnf")
-    circuit = dnnf.compile_cnf(cnf, smooth=True)   # offline, once
+    cnf = neximode.CNF.from_dimacs("theory.cnf")
+    circuit = neximode.compile_cnf(cnf, smooth=True)   # offline, once
 
-    dnnf.model_count(circuit)                      # online queries
-    dnnf.wmc(circuit, weights)
-    cost, best = dnnf.mpe(circuit, costs)
-    for cost, model in dnnf.enumerate_models(circuit, costs, k=10):
+    neximode.model_count(circuit)                      # online queries
+    neximode.wmc(circuit, weights)
+    cost, best = neximode.mpe(circuit, costs)
+    for cost, model in neximode.enumerate_models(circuit, costs, k=10):
         ...
 
-GPU evaluation (requires ``pip install dnnf-lib[torch]``)::
+GPU evaluation (requires ``pip install neximode[torch]``)::
 
-    from dnnf.torch_backend import TorchCircuit
+    from neximode.torch_backend import TorchCircuit
     tc = TorchCircuit(circuit, semiring="logprob", device="cuda")
     log_z = tc(weights)          # (B,) batched log-WMC
     marg = tc.marginals(weights) # (B, 2n) posterior literal marginals

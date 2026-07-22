@@ -12,7 +12,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from dnnf import ModeTracker, SystemModel, iff
+from neximode import ModeTracker, SystemModel, iff
 
 OUT = os.path.dirname(os.path.abspath(__file__))
 plt.rcParams.update({"font.size": 12, "figure.dpi": 130})

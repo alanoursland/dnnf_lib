@@ -1,7 +1,7 @@
 """Chapter 10 exercise solutions (ex. 1: scatter vs N)."""
 import random, sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from dnnf import SystemModel
+from neximode import SystemModel
 
 
 def build(pb):

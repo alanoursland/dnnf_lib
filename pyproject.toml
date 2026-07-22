@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dnnf-lib"
+name = "neximode"
 version = "0.1.0"
 description = "Decomposable Negation Normal Form (DNNF) compilation, weighted inference, and diagnosis, with optional PyTorch GPU evaluation"
 readme = "README.md"
@@ -30,7 +30,7 @@ torch = ["torch>=2.0"]
 dev = ["pytest>=7"]
 
 [tool.setuptools.packages.find]
-include = ["dnnf*"]
+include = ["neximode*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
