@@ -15,7 +15,11 @@ full syllabus and format contract.
 | 06 | [Real sensors lie: noise and soft evidence](06_noise.md) | done |
 | 07 | [Time: tracking a changing system](07_tracking.md) | done |
 | 08 | [Explanations: ranked worlds, what to check next](08_explanations.md) | done |
-| 09–12 | planning, learning, internals, your project | planned (PLAN.md) |
+| 09 | [Planning: the same circuit, run backwards](09_planning.md) | done |
+| 10 | [Learning: closing the loop with data](10_learning.md) | done |
+| 11 | [Under the hood](11_under_the_hood.md) | done |
+| 12 | [Your project: a workflow that won't betray you](12_your_project.md) | done |
+| — | [Appendices: cheat sheet, glossary, reading](appendices.md) | done |
 
 Every Python block in every chapter is executed by
 `tests/test_tutorial_blocks.py`, and every figure regenerates from
