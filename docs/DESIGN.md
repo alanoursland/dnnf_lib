@@ -58,8 +58,15 @@ commutative semiring computes ⊕ over models of ⊗ over literal weights
 The neg-log-probability reading: give literal `l` weight `-log P(l)`. Then
 min-sum evaluation yields the cost of the most probable model; the arg-min
 traversal decodes it; and k-best enumeration yields models most-probable
-first. This is precisely the "leaf weights are neglog probabilities"
-interpretation of the JPL engine, made formal.
+first. Attribution: the ordering-preserving log transform for most
+probable diagnoses on compiled circuits is due to Darwiche & Marquis
+(*Compiling Propositional Weighted Bases*, submitted 2002); the full
+probability-measure reading (posteriors, WMC) crystallized in Darwiche's
+differential semantics (2003) and Chavira & Darwiche's WMC line
+(2005–08). The same interpretation was arrived at independently and
+contemporaneously by practitioners of the JPL compiled-diagnosis engine
+(whose published system, MEXEC, evaluated min-sum only); this library
+carries that reading forward into learning.
 
 ## 3. Architecture
 

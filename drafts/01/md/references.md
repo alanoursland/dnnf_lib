@@ -48,3 +48,8 @@
 [Fisher1925] as the source convention for "Fisher's identity" — some
 authors cite Fisher via [Dempster1977]; keep whichever convention the
 companion paper uses.*
+- **[DarwicheMarquis2004]** A. Darwiche, P. Marquis. *Compiling
+  Propositional Weighted Bases.* Artificial Intelligence,
+  157(1–2):81–113, 2004 (submitted 2002). (Log-probability weights on
+  compiled circuits for most probable diagnoses; the
+  ordering-preservation argument.)

@@ -70,10 +70,16 @@ exactly the CPU/GPU split of modern differentiable computing.
 
 ## Narrative frame
 
-First-person continuity is the hook: the leaf-weights-as-neglog-
-probabilities observation from the original JPL work, independently
-formalized by the field (algebraic model counting), here carried to its
-modern conclusion — the diagnosis engine as a differentiable likelihood.
+First-person continuity is the hook — stated with clean attribution:
+the neg-log-probability reading of compiled diagnosis weights belongs
+to Darwiche & Marquis (weighted bases, 2002) and, in its full
+probability-measure form, to Darwiche (2003) and Chavira & Darwiche
+(2005–08); the author arrived at it independently and contemporaneously
+from the practitioner's side of the JPL engine (which itself never took
+the semiring-swap step — MEXEC evaluated min-sum only). The paper's
+contribution is not the reading but where it is carried: the diagnosis
+engine as a differentiable likelihood, with learned priors and neural
+observation models.
 Related work: Darwiche's DNNF/differential-semantics line, dsharp/D4
 compilers, probabilistic circuits, DeepProbLog/semantic-loss
 neurosymbolics, Livingstone-era mode estimation.
