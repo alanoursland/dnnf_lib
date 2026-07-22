@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
+*.whl
+*.tar.gz
 *.egg-info/
 build/
 dist/
