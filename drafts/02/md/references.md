@@ -41,4 +41,4 @@
   Approach to Reactive Self-Configuring Systems.* AAAI 1996.
 - **[neximode]** The neximode library: code, tests, benchmark and
   study scripts for every number in this paper.
-  github.com/alanoursland/dnnf_lib.
+  github.com/alanoursland/neximode.

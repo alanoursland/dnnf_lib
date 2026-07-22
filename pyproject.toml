@@ -26,9 +26,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/alanoursland/dnnf_lib"
-Repository = "https://github.com/alanoursland/dnnf_lib"
-Documentation = "https://github.com/alanoursland/dnnf_lib/tree/main/tutorial"
+Homepage = "https://github.com/alanoursland/neximode"
+Repository = "https://github.com/alanoursland/neximode"
+Documentation = "https://github.com/alanoursland/neximode/tree/main/tutorial"
 
 [project.optional-dependencies]
 torch = ["torch>=2.0"]

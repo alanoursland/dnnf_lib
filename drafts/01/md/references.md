@@ -41,7 +41,7 @@
 - **[Bishop2006]** C. M. Bishop. *Pattern Recognition and Machine
   Learning.* Springer, 2006. (Mixture likelihood singularities.)
 - **[neximode]** The neximode library and experiment suite.
-  github.com/alanoursland/dnnf_lib (tests/test_implicit_em.py;
+  github.com/alanoursland/neximode (tests/test_implicit_em.py;
   reports/implicit_em_lab_report.md).
 
 *Note: verify [Oursland2024] against the intended arXiv record(s), and
