@@ -569,6 +569,8 @@ def compile_fd(
     """
     if var_order is None and heuristic == "minfill":
         var_order = minfill_order(cnf)
+    elif var_order is None and heuristic == "dtree":
+        var_order = dtree_order(cnf)
     elif var_order is None and heuristic != "dynamic":
         raise ValueError(f"unknown heuristic {heuristic!r}")
     spec = cnf.spec
@@ -718,6 +720,165 @@ def sample(
                     break
             stack.append(chosen)
     return assignment
+
+
+def dtree_order(cnf: FDCnf, seed: int = 0, restarts: int = 2) -> List[int]:
+    """A static branching order from recursive hypergraph bisection —
+    the MEXEC compiler's recipe (Barrett 2005): clauses are hypergraph
+    nodes, variables are hyperedges weighted by log domain cardinality,
+    and the clause set is recursively split by a balanced min-cut (here
+    FM-style local search with restarts, standing in for
+    Wagner–Klimmek).  Each cut's separator variables are emitted before
+    recursing into the halves, so branching decides separators first and
+    the halves fall apart into independent components.
+
+    Status: experimental.  Measured (bench families): competitive with
+    the dynamic heuristic but not dominant — ball-seeded cuts win on
+    2-D grids, diameter-seeded cuts win on chains, and minimum cut
+    *weight* imperfectly predicts circuit size, so seed selection by
+    cut weight can pick the worse split.  The open improvement is
+    probe-compile selection (compile a few nodes under each candidate
+    order and keep the smaller); see docs/FUTURE_WORK.md."""
+    import random as _random
+
+    spec = cnf.spec
+    clause_vars = [
+        frozenset(var for var, _ in c) for c in cnf.clauses if c
+    ]
+    w = [math.log(max(s, 2)) for s in spec.sizes]
+    rng = _random.Random(seed)
+    placed: set = set()
+    order: List[int] = []
+
+    def place(vs) -> None:
+        for v in sorted(vs):
+            if v not in placed:
+                placed.add(v)
+                order.append(v)
+
+    def bisect(idxs: List[int]):
+        n = len(idxs)
+        lo, hi = n // 3, n - n // 3
+        best = None
+
+        def bfs_seed() -> Dict[int, int]:
+            # Connectivity-aware initial split: BFS over the clause
+            # adjacency (shared variables) from a random clause, cut at
+            # the median — far better than random on spatial structure.
+            var_to: Dict[int, List[int]] = {}
+            for i in idxs:
+                for v in clause_vars[i]:
+                    var_to.setdefault(v, []).append(i)
+            def bfs(start):
+                seen = {start}
+                frontier = [start]
+                out = [start]
+                while frontier:
+                    nxt = []
+                    for i in frontier:
+                        for v in clause_vars[i]:
+                            for j in var_to[v]:
+                                if j not in seen:
+                                    seen.add(j)
+                                    nxt.append(j)
+                                    out.append(j)
+                    frontier = nxt
+                for i in idxs:  # disconnected leftovers
+                    if i not in seen:
+                        out.append(i)
+                return out
+
+            # Two complementary seeds: a ball around a random start
+            # (good on 2-D/spatial structure) and a diameter-aligned
+            # order via double-BFS (good on chains).  Neither dominates;
+            # both enter the restart pool.
+            ball = bfs(idxs[rng.randrange(n)])
+            diam = bfs(ball[-1])
+            half = n // 2
+            return [
+                {i: (0 if k < half else 1) for k, i in enumerate(o)}
+                for o in (ball, diam)
+            ]
+
+        seeds = bfs_seed() + [
+            {i: rng.randint(0, 1) for i in idxs}
+            for _ in range(max(restarts - 1, 0))
+        ]
+        for side in seeds:
+            counts: Dict[int, List[int]] = {}
+            n_left = 0
+            for i in idxs:
+                if side[i] == 0:
+                    n_left += 1
+                for v in clause_vars[i]:
+                    c = counts.setdefault(v, [0, 0])
+                    c[side[i]] += 1
+
+            def delta(i: int) -> float:
+                s, o = side[i], 1 - side[i]
+                d = 0.0
+                for v in clause_vars[i]:
+                    c = counts[v]
+                    if c[s] == 1 and c[o] > 0:
+                        d -= w[v]  # leaves the cut
+                    elif c[o] == 0 and c[s] > 1:
+                        d += w[v]  # enters the cut
+                return d
+
+            def apply(i: int) -> None:
+                nonlocal n_left
+                s = side[i]
+                for v in clause_vars[i]:
+                    counts[v][s] -= 1
+                    counts[v][1 - s] += 1
+                side[i] ^= 1
+                n_left += 1 if side[i] == 0 else -1
+
+            for _pass in range(2):
+                locked: set = set()
+                while True:
+                    move, move_delta = None, None
+                    for i in idxs:
+                        if i in locked:
+                            continue
+                        nl = n_left - 1 if side[i] == 0 else n_left + 1
+                        if not lo <= nl <= hi:
+                            continue
+                        d = delta(i)
+                        if move_delta is None or d < move_delta:
+                            move, move_delta = i, d
+                    if move is None or move_delta >= 0:
+                        break
+                    apply(move)
+                    locked.add(move)
+            score = sum(
+                w[v] for v, c in counts.items() if c[0] > 0 and c[1] > 0
+            )
+            if best is None or score < best[0]:
+                best = (score, dict(side))
+        side = best[1]
+        left = [i for i in idxs if side[i] == 0]
+        right = [i for i in idxs if side[i] == 1]
+        return left, right
+
+    def rec(idxs: List[int]) -> None:
+        if len(idxs) <= 2:
+            for i in idxs:
+                place(clause_vars[i])
+            return
+        left, right = bisect(idxs)
+        if not left or not right:  # degenerate split: flatten
+            for i in idxs:
+                place(clause_vars[i])
+            return
+        lvars = set().union(*(clause_vars[i] for i in left))
+        rvars = set().union(*(clause_vars[i] for i in right))
+        place(sorted(lvars & rvars))
+        rec(left)
+        rec(right)
+
+    rec(list(range(len(clause_vars))))
+    return order
 
 
 def minfill_order(cnf: FDCnf) -> List[int]:
