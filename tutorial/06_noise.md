@@ -58,7 +58,7 @@ contradictions; the noisy model rides the evidence.
 
 ## What `sensor()` compiles to
 
-```python
+```
 m.sensor("moist", drip, false_positive=0.03, false_negative=0.08)
 ```
 
