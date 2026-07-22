@@ -11,7 +11,11 @@ full syllabus and format contract.
 | 02 | [The compile trick: circuits](02_circuits.md) | done |
 | 03 | [First contact: model, compile, count](03_first_contact.md) | done |
 | 04 | [One circuit, many questions: semirings](04_semirings.md) | done |
-| 05–12 | diagnosis, noise, time, explanations, planning, learning, internals, your project | planned (PLAN.md) |
+| 05 | [Diagnosis: modes, priors, evidence](05_diagnosis.md) | done |
+| 06 | [Real sensors lie: noise and soft evidence](06_noise.md) | done |
+| 07 | [Time: tracking a changing system](07_tracking.md) | done |
+| 08 | [Explanations: ranked worlds, what to check next](08_explanations.md) | done |
+| 09–12 | planning, learning, internals, your project | planned (PLAN.md) |
 
 Every Python block in every chapter is executed by
 `tests/test_tutorial_blocks.py`, and every figure regenerates from
