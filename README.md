@@ -15,12 +15,21 @@ log probabilities. See [docs/DESIGN.md](docs/DESIGN.md) for the full
 technical treatment and [docs/FUTURE_WORK.md](docs/FUTURE_WORK.md) for the
 roadmap from next steps to blue sky.
 
+**New to the library?** Start with the [tutorial](tutorial/README.md) —
+thirteen chapters from propositional logic to GPU-backed learning, written
+for a CS-undergrad level, with exercises and worked solutions.
+
 ## Install
 
 ```bash
-pip install -e .            # core: pure Python, no dependencies
-pip install -e .[torch]     # + PyTorch backend
-pip install -e .[dev]       # + pytest
+pip install neximode            # core: pure Python, no dependencies
+pip install neximode[torch]     # + PyTorch backend
+```
+
+From a clone (development):
+
+```bash
+pip install -e .[dev]           # editable, + pytest
 ```
 
 ## Quick start: compile and query
@@ -84,17 +93,20 @@ bucketing of numeric evidence:
 level = m.quantized("level", (0.0, 10.0, 50.0, 100.0), priors=(0.2, 0.5, 0.3))
 m.sensor("low_alarm", level.below(10.0))
 m.add((leak == "large") >> level.below(10.0))
-sys.log_evidence({"level": 37.2})     # numeric evidence, bucketed for you
+system.log_evidence({"level": 37.2})  # numeric evidence, bucketed for you
 ```
 
 Compiled systems are also **generative and learnable**:
 
 ```python
-state = sys.sample_state(rng)            # exact simulation from the model
-telemetry = [{"alarm": sys.sample_state(rng)["alarm"]} for _ in range(4000)]
-sys.fit_priors(telemetry)                # EM: learn failure rates from
+state = system.sample_state(rng)         # exact simulation from the model
+telemetry = [{"alarm": system.sample_state(rng)["alarm"]}
+             for _ in range(4000)]
+system.fit_priors(telemetry)             # EM: learn failure rates from
                                          # partially observed telemetry
-sys.posteriors(evidence, names=[...])    # exact marginals for any variable
+system.posteriors(evidence, names=[...]) # exact marginals for any variable
+system.save("plant.json")                # single-allocation reload:
+                                         # header states all bounds up front
 ```
 
 `fit_priors` is exact expectation-maximization on the circuit (E-step:
@@ -109,6 +121,13 @@ beam-filtered belief over joint mode assignments (exact HMM filtering when
 the beam covers the mode space — see `examples/home_battery.py` for a
 degrading-battery week of telemetry, and `docs/MODELING_NOTES.md` for
 ergonomics findings from that experiment).
+
+Beyond ranked diagnoses: `value_of_information` scores which sensor to
+read next (expected entropy reduction, in nats),
+`diagnoses_min_cardinality` ranks by fewest broken components, and
+`neximode.Planner` unrolls the same model over an n-step horizon to
+estimate hidden state from a command/observation history and to plan
+command sequences that reach a goal — MEXEC-style, one circuit for both.
 
 ## GPU / batched evaluation (PyTorch)
 
@@ -143,8 +162,12 @@ producing leaf weights, trained end-to-end through exact inference.
 | `neximode.kbest` | lazy ordered model enumeration |
 | `neximode.torch_backend` | layered batched tensor evaluation, marginals |
 | `neximode.fd` | native finite-domain core: FD-CNF, compiler, queries, MAP |
-| `neximode.diagnosis` | `SystemModel` / ranked diagnoses / posteriors / quantized vars |
+| `neximode.diagnosis` | `SystemModel` / ranked diagnoses / posteriors / quantized vars / EM / save-load |
 | `neximode.tracking` | `ModeTracker` temporal filtering |
+| `neximode.planning` | `Planner`: n-step estimation and command planning |
+| `neximode.torch_learn` | SGD prior learning, neural observation front-ends |
+| `neximode.viz` | Graphviz / matplotlib circuit rendering |
+| `neximode.external` | c2d compiler driver |
 | `neximode.nnf_io` | c2d `.nnf` interop |
 
 ## Tests
