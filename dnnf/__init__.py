@@ -41,6 +41,7 @@ from .eval import (
 )
 from .formula import And, Formula, Not, Or, Prop, at_most_one, exactly_one, iff, xor
 from .kbest import enumerate_map, enumerate_models
+from .planning import Planner
 from .tracking import ModeTracker
 from . import nnf_io
 
@@ -69,6 +70,7 @@ __all__ = [
     "enumerate_models",
     "minfill_order",
     "ModeTracker",
+    "Planner",
     "is_satisfiable",
     "lit_index",
     "log_wmc",

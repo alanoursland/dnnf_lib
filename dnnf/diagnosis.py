@@ -687,6 +687,92 @@ class CompiledSystem:
         out.sort(key=lambda nv: -nv[1])
         return out
 
+    # -- persistence ----------------------------------------------------
+    def save(self, path: str) -> None:
+        """Serialize the compiled system (circuit, variables, weights) to
+        JSON so the offline/online split survives process boundaries:
+        compile once, ship the file, load in the monitoring service."""
+        import json
+
+        c = self.circuit
+        doc = {
+            "format": "dnnf_lib.compiled_system.v1",
+            # All resource requirements up front, flight-software style:
+            # a loader can make one allocation pass from the header alone
+            # before reading any body section (the original spacecraft
+            # deployments of this architecture loaded with a single
+            # memory allocation and ran for the mission duration).
+            "header": {
+                "num_nodes": len(c),
+                "num_edges": c.num_edges,
+                "max_children": max(
+                    (len(ch) for ch in c.children), default=0
+                ),
+                "num_fd_vars": c.spec.num_vars,
+                "num_weight_slots": c.spec.total,
+                "max_domain": max(c.spec.sizes, default=0),
+                "num_named_vars": len(self.vars),
+            },
+            "spec_sizes": list(c.spec.sizes),
+            "kinds": list(c.kinds),
+            "lits": list(c.lits),
+            "children": [list(ch) for ch in c.children],
+            "root": c.root,
+            "weights": list(self._weights),
+            "mode_vars": list(self.mode_vars),
+            "prev_map": dict(self.prev_map),
+            "vars": [
+                {
+                    "name": v.name,
+                    "fd_var": v.fd_var,
+                    "values": list(v.values),
+                    "boundaries": getattr(v, "boundaries", None),
+                }
+                for v in self.vars.values()
+            ],
+        }
+        with open(path, "w") as f:
+            json.dump(doc, f)
+
+    @classmethod
+    def load(cls, path: str) -> "CompiledSystem":
+        import json
+
+        with open(path) as f:
+            doc = json.load(f)
+        if doc.get("format") != "dnnf_lib.compiled_system.v1":
+            raise ValueError(f"unrecognized format in {path}")
+        spec = fd.FDSpec()
+        for size in doc["spec_sizes"]:
+            spec.add_var(size)
+        circuit = fd.FDCircuit(
+            spec,
+            doc["kinds"],
+            doc["lits"],
+            [tuple(ch) for ch in doc["children"]],
+            doc["root"],
+        )
+        variables: Dict[str, FiniteVar] = {}
+        for v in doc["vars"]:
+            if v["boundaries"] is not None:
+                var = QuantizedVar(v["name"], v["boundaries"], v["fd_var"])
+            else:
+                var = FiniteVar(v["name"], v["values"], v["fd_var"])
+            variables[v["name"]] = var
+        system = cls(
+            circuit=circuit,
+            variables=variables,
+            prior_weights={},
+            mode_vars=doc["mode_vars"],
+            prev_map=doc["prev_map"],
+        )
+        system._weights = list(doc["weights"])
+        system._costs = [
+            0.0 if w == 1.0 else (math.inf if w <= 0 else -math.log(w))
+            for w in system._weights
+        ]
+        return system
+
     # -- decoding -------------------------------------------------------
     def _decode_state(
         self, assignment: Dict[int, int]
