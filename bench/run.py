@@ -18,8 +18,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 sys.path.insert(0, ".")
 
-from neximode import CNF, compile_cnf, model_count
-from neximode.compiler import minfill_order
+from modenexus import CNF, compile_cnf, model_count
+from modenexus.compiler import minfill_order
 
 
 # ----------------------------------------------------------------------
@@ -82,9 +82,9 @@ def diagnosis_chain(num_components: int):
     unless stuck_closed; per-stage flow sensors.  Structurally similar to
     compiled system models: local interactions, long chains.  Returns an
     FDCnf (native multi-valued)."""
-    from neximode import fd
-    from neximode.diagnosis import SystemModel
-    from neximode.formula import iff
+    from modenexus import fd
+    from modenexus.diagnosis import SystemModel
+    from modenexus.formula import iff
 
     m = SystemModel()
     flows = [m.bool("flow0")]
@@ -123,7 +123,7 @@ HEURISTICS = ("dynamic", "minfill")
 
 
 def run_one(name: str, cnf, heuristic: str) -> Optional[Dict[str, object]]:
-    from neximode import fd
+    from modenexus import fd
 
     if isinstance(cnf, fd.FDCnf):
         t0 = time.time()

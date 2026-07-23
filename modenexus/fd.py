@@ -4,8 +4,8 @@ This is the representation the classic DNNF diagnosis engines actually
 used: variables carry finite domains (``shutters in {open, closed}``,
 modes with several failure states), circuit leaves are atomic assignments
 ``var=value``, and decision OR nodes branch **d ways** — one child per
-domain value.  Compared to the boolean core (:mod:`neximode.circuit` /
-:mod:`neximode.compiler`), there is no one-hot encoding: no negative-literal
+domain value.  Compared to the boolean core (:mod:`modenexus.circuit` /
+:mod:`modenexus.compiler`), there is no one-hot encoding: no negative-literal
 bookkeeping leaves, no pairwise exactly-one clauses, and evidence is
 applied by masking value weights directly.
 
@@ -884,7 +884,7 @@ def dtree_order(cnf: FDCnf, seed: int = 0, restarts: int = 2) -> List[int]:
 def minfill_order(cnf: FDCnf) -> List[int]:
     """Min-fill elimination order over the FD primal graph, reversed for
     branch-first-on-central-variables (see the boolean
-    :func:`neximode.compiler.minfill_order`)."""
+    :func:`modenexus.compiler.minfill_order`)."""
     adj: Dict[int, set] = {v: set() for v in range(cnf.spec.num_vars)}
     for clause in cnf.clauses:
         cvars = [var for var, _ in clause]
@@ -962,7 +962,7 @@ def enumerate_map(
     k: Optional[int] = None,
 ) -> Iterator[Tuple[float, Dict[int, int]]]:
     """Ranked marginal MAP over ``map_vars`` (see the boolean
-    :func:`neximode.kbest.enumerate_map`; identical semantics with ``(var,
+    :func:`modenexus.kbest.enumerate_map`; identical semantics with ``(var,
     value)`` assignments).  Requires map variables decided above all
     others — compile with ``var_order=list(map_vars)``."""
     map_vars = frozenset(map_vars)

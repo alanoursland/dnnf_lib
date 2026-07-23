@@ -1,7 +1,7 @@
 """Chapter 4 exercise solutions."""
 import math, sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from neximode import SystemModel, iff, fd
+from modenexus import SystemModel, iff, fd
 
 
 def build():

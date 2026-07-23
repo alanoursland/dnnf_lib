@@ -26,7 +26,7 @@ exactly the CPU/GPU split of modern differentiable computing.
    branch d-ways; ~40% smaller circuits than boolean one-hot lowering
    on mode-rich models. All queries are semiring sweeps; ordered
    enumeration and sampling reuse one lazy k-best machinery.
-   *Evidence*: `neximode/fd.py`; brute-force cross-validation in
+   *Evidence*: `modenexus/fd.py`; brute-force cross-validation in
    `tests/test_fd.py`; size comparison in `bench/run.py` history.
 2. **Exact marginal MAP over modes via constrained compilation, with an
    empirical structure-sensitivity result.** Modes-first orders make
@@ -50,7 +50,7 @@ exactly the CPU/GPU split of modern differentiable computing.
    assignments; exact HMM filtering when the beam covers the space;
    command-conditioned and correlated (previous-joint-state-dependent)
    dynamics, verified against exact forward filters.
-   *Evidence*: `neximode/tracking.py`, `tests/test_tracking.py`,
+   *Evidence*: `modenexus/tracking.py`, `tests/test_tracking.py`,
    `tests/test_learning.py`, `tests/test_torch_learn.py`.
 5. **Learning on the compiled artifact.** Exact EM and gradient
    training provably share a fixed point (verified to ~1e-4 against
@@ -60,12 +60,12 @@ exactly the CPU/GPU split of modern differentiable computing.
    observables**, grounded by hard evidence elsewhere in the structure
    — with the two degeneracies of ungrounded/unnormalized training
    documented and reproduced.
-   *Evidence*: `neximode/torch_learn.py`, `tests/test_learning.py`,
+   *Evidence*: `modenexus/torch_learn.py`, `tests/test_learning.py`,
    `tests/test_observation.py`, `tests/test_implicit_em.py`; theory
    connection via Proposal 1.
 6. **GPU evaluation.** Layered batched tensor lowering; one backward
    pass yields all posterior marginals (differential semantics);
-   batched MPE. *Evidence*: `neximode/torch_backend.py`,
+   batched MPE. *Evidence*: `modenexus/torch_backend.py`,
    `tests/test_torch.py`.
 
 ## Narrative frame

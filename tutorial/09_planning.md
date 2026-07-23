@@ -19,8 +19,8 @@ two ways (Barrett, IJCAI 2005 — the running example below, a
 star-tracking siderostat, is that paper's own).
 
 ```python
-from neximode import Planner
-from neximode.formula import iff
+from modenexus import Planner
+from modenexus.formula import iff
 
 p = Planner()
 p.mode("sw", ("Tracking", "Idling"), priors=(0.2, 0.8))

@@ -2,7 +2,7 @@
 
 import sys
 
-from neximode import fd
+from modenexus import fd
 
 
 def test_deep_chain_compiles_under_tiny_recursion_limit():

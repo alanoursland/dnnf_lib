@@ -1,4 +1,4 @@
-# neximode
+# modenexus
 
 Compilation of propositional theories to **Decomposable Negation Normal
 Form (DNNF)**, tractable weighted reasoning on the compiled circuits, and
@@ -22,8 +22,8 @@ for a CS-undergrad level, with exercises and worked solutions.
 ## Install
 
 ```bash
-pip install neximode            # core: pure Python, no dependencies
-pip install neximode[torch]     # + PyTorch backend
+pip install modenexus            # core: pure Python, no dependencies
+pip install modenexus[torch]     # + PyTorch backend
 ```
 
 From a clone (development):
@@ -35,31 +35,31 @@ pip install -e .[dev]           # editable, + pytest
 ## Quick start: compile and query
 
 ```python
-import neximode
+import modenexus
 
-cnf = neximode.CNF(num_vars=3, clauses=[(1, 2), (-1, 3)])
-circuit = neximode.compile_cnf(cnf, smooth=True)   # decision-DNNF: decomposable,
-                                                   # deterministic, smooth
-neximode.model_count(circuit)                      # 4
-neximode.wmc(circuit, neximode.weights_from_probs(3, {1: 0.9, 2: 0.5, 3: 0.5}))
+cnf = modenexus.CNF(num_vars=3, clauses=[(1, 2), (-1, 3)])
+circuit = modenexus.compile_cnf(cnf, smooth=True)   # decision-DNNF: decomposable,
+                                                    # deterministic, smooth
+modenexus.model_count(circuit)                      # 4
+modenexus.wmc(circuit, modenexus.weights_from_probs(3, {1: 0.9, 2: 0.5, 3: 0.5}))
 
 # MPE / most probable model under neg-log costs
-costs = neximode.costs_from_probs(3, {1: 0.9, 2: 0.5, 3: 0.5})
-cost, best = neximode.mpe(circuit, costs)
+costs = modenexus.costs_from_probs(3, {1: 0.9, 2: 0.5, 3: 0.5})
+cost, best = modenexus.mpe(circuit, costs)
 
 # Models ordered most-probable-first (lazy k-best)
-for cost, model in neximode.enumerate_models(circuit, costs, k=5):
+for cost, model in modenexus.enumerate_models(circuit, costs, k=5):
     print(cost, model)
 ```
 
-DIMACS CNF (`neximode.CNF.from_dimacs`) and the c2d `.nnf` circuit format
-(`neximode.nnf_io`) are supported, so circuits from external compilers
+DIMACS CNF (`modenexus.CNF.from_dimacs`) and the c2d `.nnf` circuit format
+(`modenexus.nnf_io`) are supported, so circuits from external compilers
 (c2d, dsharp, D4) plug into the same evaluators.
 
 ## Diagnosis: modes, priors, ranked explanations
 
 ```python
-from neximode import SystemModel, iff
+from modenexus import SystemModel, iff
 
 m = SystemModel()
 v1 = m.mode("valve1", ("ok", "stuck_open", "stuck_closed"), priors=(0.98, 0.01, 0.01))
@@ -81,7 +81,7 @@ during compilation (`modes_first=True`, the default), which constrains the
 circuit so that max-over-modes / sum-over-everything-else is a single
 sweep plus lazy k-best enumeration.
 
-The diagnosis stack runs on a **native finite-domain core** (`neximode.fd`):
+The diagnosis stack runs on a **native finite-domain core** (`modenexus.fd`):
 variables carry their domains directly, circuit leaves are atomic
 assignments like `valve1=stuck_closed`, and decision nodes branch d-ways —
 no one-hot encoding, no exactly-one clauses, ~40% smaller circuits on
@@ -115,7 +115,7 @@ likelihood — failure priors estimated from fleet data instead of
 engineering guesses, with the logical model as a hard constraint.
 
 Sensors can be noisy (`m.sensor("alarm", expr, false_positive=0.1,
-false_negative=0.2)`), and `neximode.ModeTracker` runs the monitoring loop:
+false_negative=0.2)`), and `modenexus.ModeTracker` runs the monitoring loop:
 per-mode transition matrices, observations each timestep, and a
 beam-filtered belief over joint mode assignments (exact HMM filtering when
 the beam covers the mode space — see `examples/home_battery.py` for a
@@ -125,7 +125,7 @@ ergonomics findings from that experiment).
 Beyond ranked diagnoses: `value_of_information` scores which sensor to
 read next (expected entropy reduction, in nats),
 `diagnoses_min_cardinality` ranks by fewest broken components, and
-`neximode.Planner` unrolls the same model over an n-step horizon to
+`modenexus.Planner` unrolls the same model over an n-step horizon to
 estimate hidden state from a command/observation history and to plan
 command sequences that reach a goal — MEXEC-style, one circuit for both.
 
@@ -133,7 +133,7 @@ command sequences that reach a goal — MEXEC-style, one circuit for both.
 
 ```python
 import torch
-from neximode.torch_backend import TorchCircuit
+from modenexus.torch_backend import TorchCircuit
 
 tc = TorchCircuit(circuit, semiring="logprob", device="cuda")
 w = tc.weights_from_probs({1: 0.9}, batch=1024)   # (B, 2n) log-weights
@@ -154,21 +154,21 @@ producing leaf weights, trained end-to-end through exact inference.
 
 | Module | Contents |
 |---|---|
-| `neximode.cnf` | CNF container, DIMACS I/O |
-| `neximode.formula` | propositional AST, Tseitin encoding |
-| `neximode.compiler` | CNF → decision-DNNF (DPLL + components + caching) |
-| `neximode.circuit` | circuit arrays, property checks, smooth/condition |
-| `neximode.eval` | semiring sweeps: SAT, counting, WMC, log-WMC, MPE |
-| `neximode.kbest` | lazy ordered model enumeration |
-| `neximode.torch_backend` | layered batched tensor evaluation, marginals |
-| `neximode.fd` | native finite-domain core: FD-CNF, compiler, queries, MAP |
-| `neximode.diagnosis` | `SystemModel` / ranked diagnoses / posteriors / quantized vars / EM / save-load |
-| `neximode.tracking` | `ModeTracker` temporal filtering |
-| `neximode.planning` | `Planner`: n-step estimation and command planning |
-| `neximode.torch_learn` | SGD prior learning, neural observation front-ends |
-| `neximode.viz` | Graphviz / matplotlib circuit rendering |
-| `neximode.external` | c2d compiler driver |
-| `neximode.nnf_io` | c2d `.nnf` interop |
+| `modenexus.cnf` | CNF container, DIMACS I/O |
+| `modenexus.formula` | propositional AST, Tseitin encoding |
+| `modenexus.compiler` | CNF → decision-DNNF (DPLL + components + caching) |
+| `modenexus.circuit` | circuit arrays, property checks, smooth/condition |
+| `modenexus.eval` | semiring sweeps: SAT, counting, WMC, log-WMC, MPE |
+| `modenexus.kbest` | lazy ordered model enumeration |
+| `modenexus.torch_backend` | layered batched tensor evaluation, marginals |
+| `modenexus.fd` | native finite-domain core: FD-CNF, compiler, queries, MAP |
+| `modenexus.diagnosis` | `SystemModel` / ranked diagnoses / posteriors / quantized vars / EM / save-load |
+| `modenexus.tracking` | `ModeTracker` temporal filtering |
+| `modenexus.planning` | `Planner`: n-step estimation and command planning |
+| `modenexus.torch_learn` | SGD prior learning, neural observation front-ends |
+| `modenexus.viz` | Graphviz / matplotlib circuit rendering |
+| `modenexus.external` | c2d compiler driver |
+| `modenexus.nnf_io` | c2d `.nnf` interop |
 
 ## Tests
 

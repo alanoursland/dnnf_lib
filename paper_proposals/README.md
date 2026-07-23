@@ -9,7 +9,7 @@ maps its claims onto evidence that already exists in the repository
 |---|---|---|---|---|
 | 1 | [Standalone supporting paper: *Exact Responsibilities* — compiled circuits verifying implicit EM](01-implicit-em-companion.md) | arXiv, then TPM/UAI-workshop or KR audience | days–week | complete (`tests/test_implicit_em.py`) |
 | 2 | [The compiled-diagnosis architecture revisited, differentiable](02-dx-differentiable-diagnosis.md) | DX (International Workshop on Principles of Diagnosis); journal later | weeks | complete at workshop scale; one real case study short of journal scale |
-| 3 | [neximode software paper](03-joss-library.md) | JOSS | days | complete; needs packaging polish |
+| 3 | [modenexus software paper](03-joss-library.md) | JOSS | days | complete; needs packaging polish |
 
 Suggested sequencing: write #1 now as a standalone paper supporting
 (and citing) *Gradient Descent as Implicit EM* — its experiments exist

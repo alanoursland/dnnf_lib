@@ -3,7 +3,7 @@ import random
 
 import pytest
 
-from neximode import CNF, compile_cnf, condition_weights, enumerate_models
+from modenexus import CNF, compile_cnf, condition_weights, enumerate_models
 from helpers import (
     assignment_cost,
     brute_sorted_costs,

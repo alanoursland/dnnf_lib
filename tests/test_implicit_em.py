@@ -35,7 +35,7 @@ import random
 
 import pytest
 
-from neximode import SystemModel, iff
+from modenexus import SystemModel, iff
 
 
 def build_deep_system():
@@ -54,7 +54,7 @@ def build_deep_system():
 
 def test_1_gradients_are_responsibilities_at_depth():
     torch = pytest.importorskip("torch")
-    from neximode.torch_backend import TorchCircuit
+    from modenexus.torch_backend import TorchCircuit
 
     sys = build_deep_system()
     tc = TorchCircuit(sys.circuit, semiring="logprob")
@@ -139,7 +139,7 @@ def test_3a_no_normalization_gauge_explosion():
 
 def test_3b_no_clamping_posterior_collapse():
     torch = pytest.importorskip("torch")
-    from neximode.torch_learn import ObservationTrainer
+    from modenexus.torch_learn import ObservationTrainer
 
     m = SystemModel()
     v = m.mode("v", ("ok", "bad"), priors=(0.7, 0.3))

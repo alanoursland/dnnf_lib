@@ -1,4 +1,4 @@
-# Tutorial: Compiled Reasoning with neximode
+# Tutorial: Compiled Reasoning with modenexus
 
 A course for CS undergraduates: from "what is a world?" to shipping a
 diagnosis/monitoring project on your own system. See PLAN.md for the

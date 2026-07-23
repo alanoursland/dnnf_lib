@@ -18,7 +18,7 @@ What compilation adds over classic QSIM:
 Run:  python examples/cascaded_tanks.py
 """
 
-from neximode import SystemModel, iff
+from modenexus import SystemModel, iff
 
 LEVELS = ("zero", "between", "full")
 DIRS = ("dec", "std", "inc")

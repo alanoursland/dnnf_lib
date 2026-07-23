@@ -21,7 +21,7 @@ turn posteriors into procedure:
 Model for the chapter — two components, two sensors:
 
 ```python
-from neximode import SystemModel, iff
+from modenexus import SystemModel, iff
 
 m = SystemModel()
 pump = m.mode("pump", ("ok", "dead"), priors=(0.97, 0.03))
@@ -89,7 +89,7 @@ Behind both tools sits the enumerator — every consistent world,
 most probable first, generated on demand:
 
 ```python
-from neximode import fd
+from modenexus import fd
 costs = system._conditioned_costs({"moist": False})
 for i, (cost, world) in enumerate(fd.enumerate_models(system.circuit, costs)):
     print(round(cost, 3), system._decode_state(world))

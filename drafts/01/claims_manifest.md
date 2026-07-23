@@ -26,7 +26,7 @@ E2 uses seed 5; float values are exact unless marked (~).
 | C16 | gauge direction: effect on posteriors | none — every posterior invariant, abs 1e-9 | same |
 | C17 | no clamped observation: collapsed vs truthful detector | collapsed (input-ignoring) achieves strictly higher likelihood | `test_implicit_em.py::test_3b` |
 | C18 | one hard evidence channel added | ordering reverses; truthful wins | same |
-| C19 | degeneracies encountered before the theorem was known to implementers | development history: gauge blowup and posterior collapse hit as bugs during `torch_learn` development, fixed by log-softmax + grounding, later recognized as the theorem's conditions | session history; `neximode/torch_learn.py` docstrings; `tests/test_observation.py` |
+| C19 | degeneracies encountered before the theorem was known to implementers | development history: gauge blowup and posterior collapse hit as bugs during `torch_learn` development, fixed by log-softmax + grounding, later recognized as the theorem's conditions | session history; `modenexus/torch_learn.py` docstrings; `tests/test_observation.py` |
 | C20 | broader EM/SGD agreement (supporting, different benchmark) | agree with each other and analytic MLE to ~1e-4 | `tests/test_torch_learn.py::test_sgd_recovers_prior_and_matches_em` |
 | C21 | corollary claim | Darwiche's differential semantics = ∂logWMC/∂log w = P(value \| e) verified against brute-force enumeration on randomized circuits | `tests/test_torch.py::test_marginals_match_brute_force` |
 

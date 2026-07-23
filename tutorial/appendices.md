@@ -2,7 +2,7 @@
 
 ## A — API cheat sheet
 
-**Modeling** (`neximode.SystemModel`)
+**Modeling** (`modenexus.SystemModel`)
 
 | call | what | ch. |
 |---|---|---|
@@ -32,18 +32,18 @@
 Evidence values: hard (`True`, `"stuck"`, `37.2`) or soft likelihood
 vectors (`(0.8, 0.2)` / `{False: 0.8, True: 0.2}`) — ch. 6.
 
-**Time** (`neximode.ModeTracker`) — ch. 7: `ModeTracker(system, transitions,
+**Time** (`modenexus.ModeTracker`) — ch. 7: `ModeTracker(system, transitions,
 beam=)`, `.step(ev, transitions=None)`, `.marginals()`, `.belief()`;
 `transition_fn=` for correlated dynamics.
 
-**Planning** (`neximode.Planner`) — ch. 9: `mode/command/observable/
+**Planning** (`modenexus.Planner`) — ch. 9: `mode/command/observable/
 behavior/transition`, `.compile(horizon)`, then `.estimate(obs,
 commands)` / `.plan(current, target, observations=)`.
 
-**Circuit level** (`neximode.fd`) — chs. 2–4: `compile_fd`, `model_count`,
+**Circuit level** (`modenexus.fd`) — chs. 2–4: `compile_fd`, `model_count`,
 `wmc`, `log_wmc`, `mpe`, `enumerate_models`, `enumerate_map`, `sample`;
-`neximode.viz.circuit_to_dot` to look at small ones. GPU: 
-`neximode.torch_backend.TorchCircuit` (batched log-WMC, marginals via one
+`modenexus.viz.circuit_to_dot` to look at small ones. GPU: 
+`modenexus.torch_backend.TorchCircuit` (batched log-WMC, marginals via one
 backward pass).
 
 ## B — Glossary

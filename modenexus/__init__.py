@@ -1,24 +1,24 @@
-"""neximode: compilation of propositional theories to Decomposable Negation
+"""modenexus: compilation of propositional theories to Decomposable Negation
 Normal Form, tractable weighted reasoning, ordered model enumeration, and
 model-based diagnosis — with an optional PyTorch backend for batched
 GPU evaluation.
 
 Typical offline/online split::
 
-    import neximode
+    import modenexus
 
-    cnf = neximode.CNF.from_dimacs("theory.cnf")
-    circuit = neximode.compile_cnf(cnf, smooth=True)   # offline, once
+    cnf = modenexus.CNF.from_dimacs("theory.cnf")
+    circuit = modenexus.compile_cnf(cnf, smooth=True)   # offline, once
 
-    neximode.model_count(circuit)                      # online queries
-    neximode.wmc(circuit, weights)
-    cost, best = neximode.mpe(circuit, costs)
-    for cost, model in neximode.enumerate_models(circuit, costs, k=10):
+    modenexus.model_count(circuit)                      # online queries
+    modenexus.wmc(circuit, weights)
+    cost, best = modenexus.mpe(circuit, costs)
+    for cost, model in modenexus.enumerate_models(circuit, costs, k=10):
         ...
 
-GPU evaluation (requires ``pip install neximode[torch]``)::
+GPU evaluation (requires ``pip install modenexus[torch]``)::
 
-    from neximode.torch_backend import TorchCircuit
+    from modenexus.torch_backend import TorchCircuit
     tc = TorchCircuit(circuit, semiring="logprob", device="cuda")
     log_z = tc(weights)          # (B,) batched log-WMC
     marg = tc.marginals(weights) # (B, 2n) posterior literal marginals

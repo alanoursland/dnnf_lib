@@ -7,7 +7,7 @@ properties make it tractable [Darwiche2001; DarwicheMarquis2002]:
 *determinism* (OR children are pairwise logically inconsistent), and
 *smoothness* (OR children mention the same variables). Compilers in the
 exhaustive-DPLL family produce such circuits from constraint theories
-[Muise2012; LagniezMarquis2017]; our experiments use neximode's native
+[Muise2012; LagniezMarquis2017]; our experiments use modenexus's native
 finite-domain compiler, whose leaves are atomic assignments
 $X{=}x$ and whose decision nodes branch over a variable's domain.
 

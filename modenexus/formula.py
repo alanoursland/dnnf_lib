@@ -5,7 +5,7 @@ the connectives ``&``, ``|``, ``~``, ``>>`` (implies), plus the helpers
 :func:`iff`, :func:`xor`, :func:`exactly_one`, :func:`at_most_one`.
 
 ``encode(formulas, cnf)`` converts a list of constraints to clauses inside
-a :class:`neximode.cnf.CNF`, introducing fresh auxiliary (Tseitin) variables
+a :class:`modenexus.cnf.CNF`, introducing fresh auxiliary (Tseitin) variables
 for internal connectives.  The encoding uses full biconditional Tseitin
 clauses, so auxiliary variables are *functionally determined* by the
 original variables: model counts over the original variables are preserved,

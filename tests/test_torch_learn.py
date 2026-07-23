@@ -7,7 +7,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from neximode import ModeTracker, SystemModel
+from modenexus import ModeTracker, SystemModel
 
 
 def build_valve(prior_bad=0.3, fp=0.1, fn=0.1):
@@ -30,7 +30,7 @@ def test_sgd_recovers_prior_and_matches_em():
     history = sgd.fit_priors_torch(observations, epochs=400, lr=0.1)
     assert history[-1] > history[0]  # likelihood improved
 
-    from neximode.torch_learn import PriorLearner
+    from modenexus.torch_learn import PriorLearner
 
     spec = sgd.circuit.spec
     p_bad = sgd._weights[spec.mvlit(sgd.vars["v"].fd_var, 1)]
@@ -55,7 +55,7 @@ def test_written_back_priors_affect_queries():
 
 
 def test_learner_probs_normalized():
-    from neximode.torch_learn import PriorLearner
+    from modenexus.torch_learn import PriorLearner
 
     sys = build_valve()
     learner = PriorLearner(sys, names=["v"])

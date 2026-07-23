@@ -25,8 +25,8 @@ import time
 
 sys.path.insert(0, ".")
 
-from neximode import SystemModel, iff, xor
-from neximode.formula import Or
+from modenexus import SystemModel, iff, xor
+from modenexus.formula import Or
 
 
 def gate(m, name, out, expr, priors=(0.98, 0.01, 0.01)):

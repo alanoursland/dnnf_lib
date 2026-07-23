@@ -6,7 +6,7 @@ mode->bucket constraints and priors come from the TRAIN split only.
 Data: /tmp/hydraulic (see case_study.md for download)."""
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from neximode import SystemModel
+from modenexus import SystemModel
 
 D = "/tmp/hydraulic"
 def rows(f):

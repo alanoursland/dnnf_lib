@@ -13,7 +13,7 @@ Chapter 5's `moist` was an *exact* sensor: `iff(moist, drip)`. Exact
 sensors make brutal epistemics — watch what one dry reading does:
 
 ```python
-from neximode import SystemModel, iff
+from modenexus import SystemModel, iff
 
 def build(noisy):
     m = SystemModel()

@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from neximode import SystemModel
+from modenexus import SystemModel
 
 P_BAD = 0.01
 FP = 0.1

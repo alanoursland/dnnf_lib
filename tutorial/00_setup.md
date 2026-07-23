@@ -37,7 +37,7 @@ have the skills to do the same for a system *you* care about.
 ## Setup
 
 ```bash
-git clone <this repo> && cd neximode
+git clone <this repo> && cd modenexus
 pip install -e .[torch,dev]     # torch is optional until chapter 10
 python -m pytest -q             # ~290 tests should pass
 ```
@@ -45,7 +45,7 @@ python -m pytest -q             # ~290 tests should pass
 ## A 30-second taste
 
 ```python
-from neximode import SystemModel, iff
+from modenexus import SystemModel, iff
 
 m = SystemModel()
 pump = m.mode("pump", ("ok", "weak", "dead"), priors=(0.90, 0.07, 0.03))

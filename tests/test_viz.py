@@ -1,5 +1,5 @@
-from neximode import SystemModel, iff
-from neximode.viz import circuit_to_dot, layered_layout, node_label
+from modenexus import SystemModel, iff
+from modenexus.viz import circuit_to_dot, layered_layout, node_label
 
 
 def small_system():
@@ -25,7 +25,7 @@ def test_dot_contains_all_nodes_and_edges():
 
 def test_dot_with_node_values():
     sys = small_system()
-    from neximode import fd
+    from modenexus import fd
 
     vals = fd.log_values(sys.circuit, sys.log_weights_for({}))
     dot = circuit_to_dot(sys.circuit, node_values=vals)

@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from neximode import SystemModel, iff
+from modenexus import SystemModel, iff
 
 
 def build_two_valve_system():

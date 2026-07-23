@@ -4,9 +4,9 @@ import math
 
 import pytest
 
-from neximode import SystemModel, iff
-from neximode.diagnosis import CompiledSystem
-from neximode.planning import Planner
+from modenexus import SystemModel, iff
+from modenexus.diagnosis import CompiledSystem
+from modenexus.planning import Planner
 
 
 def test_save_load_round_trip(tmp_path):

@@ -1,7 +1,7 @@
 """Chapter 3 exercise solutions."""
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from neximode import SystemModel, iff, fd
+from modenexus import SystemModel, iff, fd
 sys.path.insert(0, os.path.dirname(__file__))
 from ch01 import survivors, DOMAINS, BASE
 

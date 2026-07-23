@@ -6,7 +6,7 @@ from collections import Counter
 
 import pytest
 
-from neximode import SystemModel, fd
+from modenexus import SystemModel, fd
 
 
 def build_valve(prior_bad=0.3, fp=0.1, fn=0.1):
@@ -128,8 +128,8 @@ def test_posteriors_of_hidden_vars():
 # Command-conditioned transitions
 # ----------------------------------------------------------------------
 def test_step_transition_override():
-    from neximode import ModeTracker
-    from neximode.formula import iff
+    from modenexus import ModeTracker
+    from modenexus.formula import iff
 
     m = SystemModel()
     v = m.mode("v", ("ok", "bad"), priors=(1.0, 0.0))

@@ -4,8 +4,8 @@ import math
 
 import pytest
 
-from neximode.formula import iff
-from neximode.planning import Planner
+from modenexus.formula import iff
+from modenexus.planning import Planner
 
 
 def siderostat(horizon=2):

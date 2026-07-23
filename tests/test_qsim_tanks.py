@@ -32,7 +32,7 @@ import math
 
 import pytest
 
-from neximode import SystemModel, fd, iff
+from modenexus import SystemModel, fd, iff
 
 LEVELS = ("zero", "between", "full")
 DIRS = ("dec", "std", "inc")

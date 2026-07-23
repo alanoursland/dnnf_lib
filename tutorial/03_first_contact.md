@@ -10,7 +10,7 @@
 ## The model, in the library
 
 ```python
-from neximode import SystemModel, iff, fd
+from modenexus import SystemModel, iff, fd
 
 m = SystemModel()
 pump = m.mode("pump", ("ok", "weak", "dead"), priors=(0.90, 0.07, 0.03))

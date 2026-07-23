@@ -1,7 +1,7 @@
 """Chapter 7 exercise solutions (ex. 3: the right kind of failure)."""
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from neximode import ModeTracker, SystemModel
+from modenexus import ModeTracker, SystemModel
 
 
 def build():

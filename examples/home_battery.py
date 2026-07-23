@@ -33,7 +33,7 @@ Expectations (the "physics"):
 Run:  python examples/home_battery.py
 """
 
-from neximode import ModeTracker, SystemModel, iff
+from modenexus import ModeTracker, SystemModel, iff
 
 m = SystemModel()
 

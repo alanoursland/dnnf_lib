@@ -2,7 +2,7 @@
 
 import pytest
 
-from neximode import ModeTracker, SystemModel
+from modenexus import ModeTracker, SystemModel
 
 FAIL = 0.2
 ABSORBING = {

@@ -1,6 +1,6 @@
 """Gradient-based prior learning through the differentiable circuit.
 
-Where :meth:`neximode.diagnosis.CompiledSystem.fit_priors` runs exact EM
+Where :meth:`modenexus.diagnosis.CompiledSystem.fit_priors` runs exact EM
 (ideal for independent categorical priors and modest data),
 :class:`PriorLearner` trains the same parameters by SGD on the torch
 backend: per-variable logits, softmax-normalized into value weights,
@@ -10,7 +10,7 @@ sets (observations dedup into weighted unique evidence masks and batch
 through one layered forward), runs on GPU, and composes with anything
 else differentiable — e.g. an observation model producing the masks.
 
-Requires torch (``pip install neximode[torch]``).
+Requires torch (``pip install modenexus[torch]``).
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ class PriorLearner:
     Parameters
     ----------
     system:
-        A :class:`neximode.diagnosis.CompiledSystem`.
+        A :class:`modenexus.diagnosis.CompiledSystem`.
     names:
         Variables whose priors to learn (default: the mode variables).
         Their current priors initialize the logits.

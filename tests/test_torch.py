@@ -5,9 +5,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from neximode import CNF, compile_cnf, log_wmc, mpe
-from neximode.circuit import lit_index
-from neximode.torch_backend import TorchCircuit
+from modenexus import CNF, compile_cnf, log_wmc, mpe
+from modenexus.circuit import lit_index
+from modenexus.torch_backend import TorchCircuit
 from helpers import brute_wmc, random_cnf, random_weights
 
 
@@ -99,7 +99,7 @@ def test_torch_fd_circuit_log_wmc_and_mpe(seed):
     """FD circuits evaluate through the same layered backend."""
     import random as _random
 
-    from neximode import fd
+    from modenexus import fd
     from test_fd import random_fd_cnf, random_fd_weights
 
     rng = _random.Random(900 + seed)

@@ -2,7 +2,7 @@
 
 Target: ~6 pages. Role: standalone companion supporting *Gradient
 Descent as Implicit EM* [Oursland2025] with an exactly solvable
-instantiation. All experiments live in `neximode` CI
+instantiation. All experiments live in `modenexus` CI
 (`tests/test_implicit_em.py`); numbers from
 `reports/implicit_em_lab_report.md`.
 

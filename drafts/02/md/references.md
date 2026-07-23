@@ -39,6 +39,6 @@
   Systems.* Morgan Kaufmann, 1988.
 - **[WilliamsNayak1996]** B. C. Williams, P. P. Nayak. *A Model-Based
   Approach to Reactive Self-Configuring Systems.* AAAI 1996.
-- **[neximode]** The neximode library: code, tests, benchmark and
+- **[modenexus]** The modenexus library: code, tests, benchmark and
   study scripts for every number in this paper.
-  github.com/alanoursland/neximode.
+  github.com/alanoursland/modenexus.

@@ -39,7 +39,7 @@ arbitrarily deep alternations of mixtures (OR) and independent factors
 (AND).
 
 We report three results, all machine-checked in the open-source library
-neximode and reproducible with one command (Section 4):
+modenexus and reproducible with one command (Section 4):
 
 1. **Gradients are responsibilities, exactly and at depth.** The
    backward pass of the log weighted model count through a multi-level
