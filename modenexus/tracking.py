@@ -45,7 +45,17 @@ Transitions = Dict[str, Dict[str, Dict[str, float]]]
 class TrackedBelief(list):
     """Normalized tracker belief carrying approximation metadata.
 
-    This remains a ``list`` for compatibility with existing consumers.
+    This remains a ``list`` for compatibility with existing consumers, but
+    plain ``list`` copy paths (``list(belief)``, ``belief[:]``,
+    ``iter(belief)`` unpacking) discard a subclass's attributes silently,
+    which would let a copy claim an exactness/mass guarantee that
+    :meth:`plan_belief` never actually checked. ``copy()`` and slicing are
+    therefore overridden to carry the metadata forward, and any in-place
+    mutation (``__setitem__``, ``append``, ``extend``, ``clear``, ``sort``,
+    ``pop``, ``remove``, ``insert``, ``__iadd__``) invalidates it instead of
+    silently reporting stale exactness or mass.  Use ``list(belief)`` when a
+    metadata-free plain list is explicitly wanted; it still loses the
+    attributes, but that is now the only way to get an unscoped copy.
     ``retained_probability_mass`` is a lower bound relative to the exact
     posterior when known; ``None`` means no nontrivial mass certificate is
     available.
@@ -62,6 +72,79 @@ class TrackedBelief(list):
         self.exact = exact
         self.retained_probability_mass = retained_probability_mass
         self.source = "ModeTracker"
+
+    def _invalidate(self) -> None:
+        self.exact = False
+        self.retained_probability_mass = None
+
+    def __setitem__(self, index, value) -> None:
+        super().__setitem__(index, value)
+        self._invalidate()
+
+    def __delitem__(self, index) -> None:
+        super().__delitem__(index)
+        self._invalidate()
+
+    def __iadd__(self, other):
+        result = super().__iadd__(other)
+        self._invalidate()
+        return result
+
+    def __imul__(self, count):
+        result = super().__imul__(count)
+        self._invalidate()
+        return result
+
+    def append(self, value) -> None:
+        super().append(value)
+        self._invalidate()
+
+    def extend(self, values) -> None:
+        super().extend(values)
+        self._invalidate()
+
+    def insert(self, index, value) -> None:
+        super().insert(index, value)
+        self._invalidate()
+
+    def remove(self, value) -> None:
+        super().remove(value)
+        self._invalidate()
+
+    def pop(self, index=-1):
+        value = super().pop(index)
+        self._invalidate()
+        return value
+
+    def clear(self) -> None:
+        super().clear()
+        self._invalidate()
+
+    def sort(self, *args, **kwargs) -> None:
+        super().sort(*args, **kwargs)
+        self._invalidate()
+
+    def reverse(self) -> None:
+        super().reverse()
+        self._invalidate()
+
+    def copy(self) -> "TrackedBelief":
+        """Metadata-preserving copy; ``list(belief)`` yields a plain list."""
+        return TrackedBelief(
+            list(self),
+            exact=self.exact,
+            retained_probability_mass=self.retained_probability_mass,
+        )
+
+    def __getitem__(self, index):
+        value = super().__getitem__(index)
+        if isinstance(index, slice):
+            return TrackedBelief(
+                value,
+                exact=self.exact,
+                retained_probability_mass=self.retained_probability_mass,
+            )
+        return value
 
 
 @dataclass(frozen=True)

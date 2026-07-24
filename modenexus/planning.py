@@ -25,6 +25,7 @@ exact (wrap noisy sensing in the behavior constraints if needed).
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from itertools import product
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -33,6 +34,160 @@ from . import fd
 from .compile_control import CompileControl
 from .diagnosis import SystemModel, _normalize_categorical_weights
 from .formula import Formula
+
+
+@dataclass(frozen=True)
+class PlanningStats:
+    """Snapshot of an in-progress or completed belief-planning search."""
+
+    elapsed_seconds: float
+    policy_nodes: int
+    outcome_branches: int
+    observation_branches: int
+    best_action: Optional[Dict[str, object]]
+    best_expected_utility: Optional[float]
+    complete: bool = False
+
+
+class PlanningInterrupted(RuntimeError):
+    """Base class for cooperative belief-planning termination."""
+
+    def __init__(self, message: str, stats: PlanningStats):
+        super().__init__(message)
+        self.stats = stats
+
+
+class PlanningCancelled(PlanningInterrupted):
+    """Raised when a plan_belief cancellation callback requests a stop."""
+
+
+class PlanningBudgetExceeded(PlanningInterrupted, ValueError):
+    """Raised when a plan_belief time, deadline, or resource budget is
+    exceeded.  Also a ``ValueError`` so callers already catching the plain
+    hard-cap errors keep working; ``stats`` carries the partial search
+    counts and best root action found before the limit tripped."""
+
+
+@dataclass(frozen=True)
+class PlanControl:
+    """Optional cooperative timeout, cancellation, and progress reporting
+    for :meth:`CompiledPlanner.plan_belief`'s conditional-policy search.
+
+    This is independent of the existing hard ``max_action_sequences``,
+    ``max_outcome_branches``, ``max_policy_nodes``, and
+    ``max_observation_branches`` counts, which remain plain resource caps
+    raising ``ValueError``.  ``PlanControl`` instead lets an interactive or
+    real-time caller bound wall-clock time, cancel promptly, and observe
+    progress without changing those caps.
+
+    Parameters
+    ----------
+    timeout_seconds:
+        Maximum elapsed wall-clock time for this search.
+    deadline:
+        Absolute :func:`time.monotonic` deadline.  When both deadline and
+        timeout are supplied, the earlier limit wins.
+    cancel:
+        Zero-argument callback returning true when cancellation is requested.
+    progress:
+        Callback receiving :class:`PlanningStats` snapshots, including the
+        best root action found so far.  A final snapshot with
+        ``complete=True`` is always emitted on success.
+    progress_interval:
+        Minimum seconds between non-final progress callbacks.
+    """
+
+    timeout_seconds: Optional[float] = None
+    deadline: Optional[float] = None
+    cancel: Optional[Callable[[], bool]] = None
+    progress: Optional[Callable[[PlanningStats], None]] = None
+    progress_interval: float = 0.25
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds is not None and (
+            not math.isfinite(self.timeout_seconds)
+            or self.timeout_seconds < 0
+        ):
+            raise ValueError("timeout_seconds must be finite and non-negative")
+        if self.deadline is not None and not math.isfinite(self.deadline):
+            raise ValueError("deadline must be finite")
+        if (
+            not math.isfinite(self.progress_interval)
+            or self.progress_interval < 0
+        ):
+            raise ValueError("progress_interval must be finite and non-negative")
+
+    def _start(self) -> "_PlanSession":
+        return _PlanSession(self)
+
+
+class _PlanSession:
+    """Mutable per-invocation state owned by :meth:`CompiledPlanner.plan_belief`."""
+
+    def __init__(self, control: PlanControl):
+        self.control = control
+        self.started = time.monotonic()
+        timeout_deadline = (
+            self.started + control.timeout_seconds
+            if control.timeout_seconds is not None
+            else None
+        )
+        if timeout_deadline is None:
+            self.deadline = control.deadline
+        elif control.deadline is None:
+            self.deadline = timeout_deadline
+        else:
+            self.deadline = min(timeout_deadline, control.deadline)
+        self.last_progress = self.started
+        self.policy_nodes = 0
+        self.outcome_branches = 0
+        self.observation_branches = 0
+        self.best_action: Optional[Dict[str, object]] = None
+        self.best_expected_utility: Optional[float] = None
+
+    def note_root_candidate(
+        self, action: Dict[str, object], expected_utility: float
+    ) -> None:
+        if (
+            self.best_expected_utility is None
+            or expected_utility > self.best_expected_utility
+        ):
+            self.best_action = dict(action)
+            self.best_expected_utility = expected_utility
+
+    def snapshot(self, complete: bool = False) -> PlanningStats:
+        return PlanningStats(
+            elapsed_seconds=time.monotonic() - self.started,
+            policy_nodes=self.policy_nodes,
+            outcome_branches=self.outcome_branches,
+            observation_branches=self.observation_branches,
+            best_action=self.best_action,
+            best_expected_utility=self.best_expected_utility,
+            complete=complete,
+        )
+
+    def check(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if self.control.cancel is not None and self.control.cancel():
+            raise PlanningCancelled(
+                "belief planning cancelled", self.snapshot()
+            )
+        if self.deadline is not None and now >= self.deadline:
+            raise PlanningBudgetExceeded(
+                "belief planning time budget exceeded", self.snapshot()
+            )
+        if self.control.progress is not None and (
+            force
+            or now - self.last_progress >= self.control.progress_interval
+        ):
+            self.control.progress(self.snapshot())
+            self.last_progress = now
+
+    def finish(self) -> PlanningStats:
+        stats = self.snapshot(complete=True)
+        if self.control.progress is not None:
+            self.control.progress(stats)
+        return stats
 
 
 @dataclass
@@ -151,7 +306,16 @@ class BeliefPolicyResult:
 
 @dataclass(frozen=True)
 class BeliefPolicyBranch:
-    """One observation edge in a conditional belief-policy tree."""
+    """One observation edge in a conditional belief-policy tree.
+
+    ``posterior`` is the normalized observation-conditioned joint belief the
+    planner optimized the continuation against — the hidden states that
+    justify the branch's action, exposed instead of forcing applications to
+    re-derive outcome propagation and Bayes weighting themselves.  For the
+    aggregated pruned-observation fallback branch on
+    :attr:`BeliefPolicyNode.fallback_policy`, ``contributing_observations``
+    lists the pruned observations merged into that posterior.
+    """
 
     observation: Dict[str, object]
     probability: float
@@ -159,6 +323,42 @@ class BeliefPolicyBranch:
     expected_action_cost: float
     expected_utility: float
     policy: Optional["BeliefPolicyNode"]
+    posterior: Tuple[Tuple[Dict[str, object], float], ...] = ()
+    contributing_observations: Tuple[Dict[str, object], ...] = ()
+
+    def posterior_marginals(self) -> Dict[str, Dict[object, float]]:
+        """Per-variable marginals of :attr:`posterior`."""
+        out: Dict[str, Dict[object, float]] = {}
+        for state, probability in self.posterior:
+            for name, value in state.items():
+                out.setdefault(name, {})
+                out[name][value] = out[name].get(value, 0.0) + probability
+        return out
+
+
+@dataclass(frozen=True)
+class BeliefPolicyRouting:
+    """Structured result of routing an observation through a policy node.
+
+    ``kind`` is one of:
+
+    - ``"exact"``: the observation, projected onto the node's
+      :attr:`~BeliefPolicyNode.observation_schema`, matched a retained
+      branch (``branch`` and ``policy`` are set);
+    - ``"fallback"``: a well-formed observation matched no retained branch
+      and routed to the pruned-observation fallback policy (``branch`` is
+      the aggregate :attr:`~BeliefPolicyNode.fallback_branch`);
+    - ``"terminal"``: the node has no continuations (end of the policy);
+    - ``"unmatched"``: no retained branch matched and no fallback exists.
+
+    ``projected_observation`` is the schema projection actually compared,
+    so callers can see exactly which fields participated in matching.
+    """
+
+    kind: str
+    policy: Optional["BeliefPolicyNode"]
+    branch: Optional["BeliefPolicyBranch"]
+    projected_observation: Dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -166,7 +366,9 @@ class BeliefPolicyNode:
     """One action and its observation-contingent continuations.
 
     ``fallback_policy`` receives observations omitted by threshold or top-k
-    pruning. ``retained_observation_probability`` includes all later levels;
+    pruning; ``fallback_branch`` carries that fallback's aggregate posterior
+    and the pruned observations contributing to it.
+    ``retained_observation_probability`` includes all later levels;
     ``discarded_observation_probability`` is local to this node.
     """
 
@@ -180,16 +382,85 @@ class BeliefPolicyNode:
     fallback_policy: Optional["BeliefPolicyNode"]
     retained_observation_probability: float
     discarded_observation_probability: float
+    fallback_branch: Optional[BeliefPolicyBranch] = None
+
+    @property
+    def observation_schema(self) -> Tuple[str, ...]:
+        """Sorted keys this node's retained branch observations use.
+
+        This is the planner-side schema an execution-time telemetry mapping
+        must cover to be routable; extra keys are ignored by :meth:`route`.
+        """
+        keys = set()
+        for branch in self.branches:
+            keys.update(branch.observation)
+        return tuple(sorted(keys))
+
+    def route(
+        self, observation: Mapping[str, object]
+    ) -> BeliefPolicyRouting:
+        """Route an observation and report how it was matched.
+
+        The observation is projected onto :attr:`observation_schema`, so
+        telemetry mappings carrying extra sensor fields match their retained
+        branch instead of leaking to the pruned-observation fallback.  A
+        mapping *missing* schema keys is a shape mismatch — an integration
+        error, not a low-probability observation — and raises ``KeyError``
+        rather than silently routing through the probabilistic fallback.
+        """
+        if not self.branches and self.fallback_policy is None:
+            return BeliefPolicyRouting(
+                kind="terminal",
+                policy=None,
+                branch=None,
+                projected_observation=dict(observation),
+            )
+        schema = self.observation_schema
+        supplied = dict(observation)
+        missing = [key for key in schema if key not in supplied]
+        if missing:
+            raise KeyError(
+                f"observation is missing planner schema keys {missing}; "
+                f"schema is {list(schema)}.  Routing a partial observation "
+                "through the pruned-observation fallback would silently "
+                "change the selected action"
+            )
+        projected = {key: supplied[key] for key in schema}
+        for branch in self.branches:
+            if branch.observation == projected:
+                return BeliefPolicyRouting(
+                    kind="exact",
+                    policy=branch.policy,
+                    branch=branch,
+                    projected_observation=projected,
+                )
+        if self.fallback_policy is not None:
+            return BeliefPolicyRouting(
+                kind="fallback",
+                policy=self.fallback_policy,
+                branch=self.fallback_branch,
+                projected_observation=projected,
+            )
+        return BeliefPolicyRouting(
+            kind="unmatched",
+            policy=None,
+            branch=None,
+            projected_observation=projected,
+        )
 
     def continuation(
         self, observation: Mapping[str, object]
     ) -> Optional["BeliefPolicyNode"]:
-        """Return the matching continuation or the pruned-observation fallback."""
-        observed = dict(observation)
-        for branch in self.branches:
-            if branch.observation == observed:
-                return branch.policy
-        return self.fallback_policy
+        """Return the continuation for an observation via :meth:`route`.
+
+        Extra observation keys are projected away before matching; missing
+        schema keys raise ``KeyError``.  A well-formed observation matching
+        no retained branch returns the pruned-observation fallback (or
+        ``None`` when the policy is terminal or has no fallback).  Use
+        :meth:`route` to distinguish exact, fallback, terminal, and
+        unmatched routing explicitly.
+        """
+        return self.route(observation).policy
 
     @property
     def utility_lower_bound(self) -> float:
@@ -598,6 +869,7 @@ class CompiledPlanner:
         max_observation_branches: int = 100_000,
         min_observation_probability: float = 0.0,
         max_observations_per_node: Optional[int] = None,
+        control: Optional[PlanControl] = None,
     ) -> (
         BeliefPlanResult
         | BeliefPolicyResult
@@ -637,6 +909,15 @@ class CompiledPlanner:
         state itself implements perfect observation; returning an empty
         mapping implements no information.
 
+        Unlike ``belief`` (validated and normalized above), the
+        probabilities returned by ``outcome_model`` and ``observation_model``
+        are a physical distribution over the branches of that one call and
+        must already sum to 1 within ``1e-6`` relative tolerance; a total
+        outside that tolerance raises ``ValueError`` naming the state,
+        action, and observed total rather than being silently rescaled.
+        This catches, for example, two outcomes summing to 0.5 because a
+        third branch was left out.
+
         Approximate conditional planning can set
         ``min_observation_probability`` and/or
         ``max_observations_per_node``. Rare observation groups are merged
@@ -652,6 +933,14 @@ class CompiledPlanner:
         dictionary.  Evaluations are returned best-first.  The explicit
         sequence, outcome-branch, policy-node, and observation-branch limits
         make exponential lookahead inspectable and provisionable.
+
+        ``control`` optionally supplies cooperative wall-clock limits,
+        a cancellation callback, and progress reporting, mirroring
+        :class:`modenexus.CompileControl` for compilation.  Cancellations
+        raise :class:`PlanningCancelled`; time and resource budgets raise
+        :class:`PlanningBudgetExceeded` (also a ``ValueError``).  Both carry
+        a :class:`PlanningStats` snapshot with the partial search counts and
+        the best fully evaluated root action so far.
         """
         if len(self.command_names) != 1:
             raise NotImplementedError(
@@ -729,6 +1018,11 @@ class CompiledPlanner:
                 )
         if belief_exact is True:
             supplied_retained_mass = 1.0
+
+        # A session always exists so budget errors can carry partial stats;
+        # with the default control it has no deadline, cancel, or progress.
+        session = (control or PlanControl())._start()
+        session.check(force=control is not None and control.progress is not None)
 
         weighted_states = list(belief)
         if not weighted_states:
@@ -835,25 +1129,37 @@ class CompiledPlanner:
                 )
             return numeric
 
-        def normalized_outcomes(
-            state: Dict[str, object], command: Dict[str, object]
+        def checked_probability_distribution(
+            entries: Sequence[Tuple[Mapping[str, object], object]],
+            *,
+            kind: str,
+            context: str,
         ) -> List[Tuple[Dict[str, object], float]]:
-            if outcome_model is None:
-                raise RuntimeError("normalized_outcomes needs outcome_model")
-            outcomes = list(outcome_model(dict(state), dict(command)))
-            if not outcomes:
-                raise ValueError(
-                    f"outcome_model returned no outcomes for "
-                    f"state={state}, action={command}"
-                )
+            """Validate a callback's (item, probability) pairs and require
+            the total to already be normalized to one within tolerance.
+
+            Silent normalization of an arbitrary positive total would accept
+            e.g. two outcomes summing to 0.5 as if that were the complete
+            distribution, masking a forgotten branch; instead any total
+            outside a small tolerance of 1.0 is a contextual ValueError.
+            """
             checked = []
             total = 0.0
-            for outcome, probability in outcomes:
+            for index, item in enumerate(entries):
+                try:
+                    value, probability = item
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"{kind} entries must be (value, probability) "
+                        f"pairs; entry {index} is {item!r}"
+                    ) from None
+                if not isinstance(value, Mapping):
+                    raise ValueError(f"{kind} {index} is not a mapping")
                 try:
                     numeric_probability = float(probability)
                 except (TypeError, ValueError):
                     raise ValueError(
-                        "outcome probabilities must be finite and "
+                        f"{kind} probability must be finite and "
                         f"non-negative; got {probability!r}"
                     ) from None
                 if (
@@ -861,21 +1167,37 @@ class CompiledPlanner:
                     or numeric_probability < 0.0
                 ):
                     raise ValueError(
-                        "outcome probabilities must be finite and "
+                        f"{kind} probability must be finite and "
                         f"non-negative; got {probability!r}"
                     )
-                checked.append((dict(outcome), numeric_probability))
+                checked.append((dict(value), numeric_probability))
                 total += numeric_probability
-            if not math.isfinite(total) or total <= 0:
+            if not checked:
+                raise ValueError(f"{kind} must not be empty for {context}")
+            if not math.isfinite(total) or not math.isclose(
+                total, 1.0, rel_tol=1e-6, abs_tol=1e-9
+            ):
                 raise ValueError(
-                    "outcome probabilities must have positive finite "
-                    "total mass"
+                    f"{kind} for {context} must sum to 1 (within 1e-6); "
+                    f"got total {total!r}"
                 )
             return [
-                (outcome, probability / total)
-                for outcome, probability in checked
+                (value, probability)
+                for value, probability in checked
                 if probability > 0.0
             ]
+
+        def normalized_outcomes(
+            state: Dict[str, object], command: Dict[str, object]
+        ) -> List[Tuple[Dict[str, object], float]]:
+            if outcome_model is None:
+                raise RuntimeError("normalized_outcomes needs outcome_model")
+            outcomes = list(outcome_model(dict(state), dict(command)))
+            return checked_probability_distribution(
+                outcomes,
+                kind="outcome probabilities",
+                context=f"state={state}, action={command}",
+            )
 
         def normalized_observations(
             state: Dict[str, object], command: Dict[str, object]
@@ -889,53 +1211,11 @@ class CompiledPlanner:
                 observations = [(supplied, 1.0)]
             else:
                 observations = list(supplied)
-            if not observations:
-                raise ValueError(
-                    "observation_model returned no observations for "
-                    f"state={state}, action={command}"
-                )
-            checked = []
-            total = 0.0
-            for index, item in enumerate(observations):
-                try:
-                    observation, probability = item
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        "observation_model entries must be "
-                        "(observation, probability) pairs; "
-                        f"entry {index} is {item!r}"
-                    ) from None
-                if not isinstance(observation, Mapping):
-                    raise ValueError(
-                        f"observation {index} is not a mapping"
-                    )
-                try:
-                    numeric_probability = float(probability)
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        "observation probabilities must be finite and "
-                        f"non-negative; got {probability!r}"
-                    ) from None
-                if (
-                    not math.isfinite(numeric_probability)
-                    or numeric_probability < 0.0
-                ):
-                    raise ValueError(
-                        "observation probabilities must be finite and "
-                        f"non-negative; got {probability!r}"
-                    )
-                checked.append((dict(observation), numeric_probability))
-                total += numeric_probability
-            if not math.isfinite(total) or total <= 0.0:
-                raise ValueError(
-                    "observation probabilities must have positive finite "
-                    "total mass"
-                )
-            return [
-                (observation, probability / total)
-                for observation, probability in checked
-                if probability > 0.0
-            ]
+            return checked_probability_distribution(
+                observations,
+                kind="observation probabilities",
+                context=f"state={state}, action={command}",
+            )
 
         def frozen_mapping(
             value: Mapping[str, object],
@@ -960,6 +1240,13 @@ class CompiledPlanner:
                 "pruned_observation_branches": 0,
             }
 
+            def sync_session() -> None:
+                session.policy_nodes = counters["policy_nodes"]
+                session.outcome_branches = counters["outcome_branches"]
+                session.observation_branches = counters[
+                    "observation_branches"
+                ]
+
             def solve_conditional_policy(
                 branch_belief: Sequence[
                     Tuple[Dict[str, object], float]
@@ -969,10 +1256,13 @@ class CompiledPlanner:
                 candidates: List[BeliefPolicyNode] = []
                 for action in action_values:
                     counters["policy_nodes"] += 1
+                    sync_session()
+                    session.check()
                     if counters["policy_nodes"] > max_policy_nodes:
-                        raise ValueError(
+                        raise PlanningBudgetExceeded(
                             "conditional belief lookahead exceeded "
-                            f"max_policy_nodes={max_policy_nodes}"
+                            f"max_policy_nodes={max_policy_nodes}",
+                            session.snapshot(),
                         )
                     command = {command_name: action}
                     expanded_outcomes: List[
@@ -989,10 +1279,12 @@ class CompiledPlanner:
                                 counters["outcome_branches"]
                                 > max_outcome_branches
                             ):
-                                raise ValueError(
+                                sync_session()
+                                raise PlanningBudgetExceeded(
                                     "conditional belief lookahead exceeded "
                                     f"max_outcome_branches="
-                                    f"{max_outcome_branches}"
+                                    f"{max_outcome_branches}",
+                                    session.snapshot(),
                                 )
                             next_state = dict(state)
                             next_state.update(updates)
@@ -1060,6 +1352,11 @@ class CompiledPlanner:
                                 discarded_observation_probability=0.0,
                             )
                         )
+                        if step == 0:
+                            session.note_root_candidate(
+                                candidates[-1].action,
+                                candidates[-1].expected_utility,
+                            )
                         continue
 
                     grouped: Dict[
@@ -1154,10 +1451,12 @@ class CompiledPlanner:
                             counters["observation_branches"]
                             > max_observation_branches
                         ):
-                            raise ValueError(
+                            sync_session()
+                            raise PlanningBudgetExceeded(
                                 "conditional belief lookahead exceeded "
                                 f"max_observation_branches="
-                                f"{max_observation_branches}"
+                                f"{max_observation_branches}",
+                                session.snapshot(),
                             )
 
                     for group in retained_groups:
@@ -1192,10 +1491,16 @@ class CompiledPlanner:
                                 expected_action_cost=branch_cost,
                                 expected_utility=branch_utility,
                                 policy=child,
+                                posterior=tuple(
+                                    (dict(state), state_probability)
+                                    for state, state_probability
+                                    in posterior
+                                ),
                             )
                         )
 
                     fallback_policy: Optional[BeliefPolicyNode] = None
+                    fallback_branch: Optional[BeliefPolicyBranch] = None
                     discarded_probability = sum(
                         float(group["mass"])
                         for group in discarded_groups
@@ -1224,6 +1529,29 @@ class CompiledPlanner:
                         ]
                         fallback_policy, _ = solve_conditional_policy(
                             fallback_belief, step + 1
+                        )
+                        fallback_branch = BeliefPolicyBranch(
+                            observation={},
+                            probability=discarded_probability,
+                            expected_goal_probability=(
+                                fallback_policy.expected_goal_probability
+                            ),
+                            expected_action_cost=(
+                                fallback_policy.expected_action_cost
+                            ),
+                            expected_utility=(
+                                fallback_policy.expected_utility
+                            ),
+                            policy=fallback_policy,
+                            posterior=tuple(
+                                (dict(state), state_probability)
+                                for state, state_probability
+                                in fallback_belief
+                            ),
+                            contributing_observations=tuple(
+                                dict(group["observation"])
+                                for group in discarded_groups
+                            ),
                         )
                         expected_goal += (
                             discarded_probability
@@ -1267,8 +1595,14 @@ class CompiledPlanner:
                             discarded_observation_probability=(
                                 discarded_probability
                             ),
+                            fallback_branch=fallback_branch,
                         )
                     )
+                    if step == 0:
+                        session.note_root_candidate(
+                            candidates[-1].action,
+                            candidates[-1].expected_utility,
+                        )
 
                 candidates.sort(
                     key=lambda item: (
@@ -1282,6 +1616,7 @@ class CompiledPlanner:
             best_policy, root_evaluations = solve_conditional_policy(
                 checked_states, 0
             )
+            sync_session()
             is_approximate = (
                 counters["pruned_observation_branches"] > 0
             )
@@ -1382,6 +1717,7 @@ class CompiledPlanner:
                 maximum_regret = 0.0
             root_action_certified = maximum_regret == 0.0
             belief_is_approximate = belief_exact is False
+            session.finish()
             return ConditionalBeliefPolicyResult(
                 policy=best_policy,
                 evaluations=root_evaluations,
@@ -1451,15 +1787,17 @@ class CompiledPlanner:
         if self.horizon > 1:
             sequence_count = len(action_values) ** self.horizon
             if sequence_count > max_action_sequences:
-                raise ValueError(
+                raise PlanningBudgetExceeded(
                     f"belief lookahead requires {sequence_count} action "
                     f"sequences, exceeding "
-                    f"max_action_sequences={max_action_sequences}"
+                    f"max_action_sequences={max_action_sequences}",
+                    session.snapshot(),
                 )
             sequence_evaluations: List[BeliefSequenceEvaluation] = []
             for action_sequence in product(
                 action_values, repeat=self.horizon
             ):
+                session.check()
                 commands = tuple(
                     {command_name: action} for action in action_sequence
                 )
@@ -1533,11 +1871,13 @@ class CompiledPlanner:
                                         outcome_evidence,
                                     )
                                 )
+                                session.outcome_branches += 1
                                 if len(expanded) > max_outcome_branches:
-                                    raise ValueError(
+                                    raise PlanningBudgetExceeded(
                                         "belief lookahead exceeded "
                                         f"max_outcome_branches="
-                                        f"{max_outcome_branches}"
+                                        f"{max_outcome_branches}",
+                                        session.snapshot(),
                                     )
                         branches = expanded
                         expected_by_step.append(
@@ -1563,6 +1903,7 @@ class CompiledPlanner:
                         expected_goal_probabilities=tuple(expected_by_step),
                     )
                 )
+                session.note_root_candidate(commands[0], utility)
             sequence_evaluations.sort(
                 key=lambda item: (
                     -item.expected_utility,
@@ -1570,6 +1911,7 @@ class CompiledPlanner:
                 )
             )
             best_sequence = sequence_evaluations[0]
+            session.finish()
             return BeliefPolicyResult(
                 commands=tuple(
                     dict(command) for command in best_sequence.commands
@@ -1587,6 +1929,7 @@ class CompiledPlanner:
 
         evaluations: List[BeliefActionEvaluation] = []
         for action in action_values:
+            session.check()
             command = {command_name: action}
             expected_goal = 0.0
             for state, state_mass in checked_states:
@@ -1595,41 +1938,10 @@ class CompiledPlanner:
                 if outcome_model is None:
                     state_goal = conditional_goal_probability(base)
                 else:
-                    outcomes = list(outcome_model(dict(state), dict(command)))
-                    if not outcomes:
-                        raise ValueError(
-                            f"outcome_model returned no outcomes for "
-                            f"state={state}, action={command}"
-                        )
-                    checked_outcomes = []
-                    outcome_total = 0.0
-                    for outcome, probability in outcomes:
-                        try:
-                            numeric_probability = float(probability)
-                        except (TypeError, ValueError):
-                            raise ValueError(
-                                "outcome probabilities must be finite and "
-                                f"non-negative; got {probability!r}"
-                            ) from None
-                        if (
-                            not math.isfinite(numeric_probability)
-                            or numeric_probability < 0.0
-                        ):
-                            raise ValueError(
-                                "outcome probabilities must be finite and "
-                                f"non-negative; got {probability!r}"
-                            )
-                        checked_outcomes.append(
-                            (dict(outcome), numeric_probability)
-                        )
-                        outcome_total += numeric_probability
-                    if not math.isfinite(outcome_total) or outcome_total <= 0:
-                        raise ValueError(
-                            "outcome probabilities must have positive "
-                            "finite total mass"
-                        )
                     state_goal = 0.0
-                    for updates, probability in checked_outcomes:
+                    for updates, probability in normalized_outcomes(
+                        state, command
+                    ):
                         next_state = {
                             name: value for name, value in state.items()
                             if name in self.mode_names
@@ -1648,7 +1960,6 @@ class CompiledPlanner:
                         )
                         state_goal += (
                             probability
-                            / outcome_total
                             * conditional_goal_probability(outcome_evidence)
                         )
                 expected_goal += state_mass * state_goal
@@ -1662,9 +1973,11 @@ class CompiledPlanner:
                     expected_utility=utility,
                 )
             )
+            session.note_root_candidate(command, utility)
 
         evaluations.sort(key=lambda item: -item.expected_utility)
         best = evaluations[0]
+        session.finish()
         return BeliefPlanResult(
             action=dict(best.action),
             expected_goal_probability=best.expected_goal_probability,

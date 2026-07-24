@@ -265,3 +265,46 @@ def test_refine_until_reports_resource_work_and_certificate_scope():
     assert result.total_steps_replayed == 1
     assert result.total_replay_seconds >= 0
     assert result.total_evaluation_seconds >= 0
+
+
+def test_tracked_belief_copy_and_slice_preserve_metadata():
+    from modenexus.tracking import TrackedBelief
+
+    tb = TrackedBelief(
+        [({"m": "ok"}, 0.5), ({"m": "bad"}, 0.5)],
+        exact=True,
+        retained_probability_mass=1.0,
+    )
+    for copy in (tb.copy(), tb[:], tb[0:2]):
+        assert isinstance(copy, TrackedBelief)
+        assert copy.exact
+        assert copy.retained_probability_mass == pytest.approx(1.0)
+        assert list(copy) == list(tb)
+
+    plain = list(tb)
+    assert type(plain) is list
+    assert not hasattr(plain, "exact")
+
+
+def test_tracked_belief_mutation_invalidates_metadata():
+    from modenexus.tracking import TrackedBelief
+
+    tb = TrackedBelief(
+        [({"m": "ok"}, 0.5), ({"m": "bad"}, 0.5)],
+        exact=True,
+        retained_probability_mass=1.0,
+    )
+    mutated = tb.copy()
+    mutated[:] = [({"m": "ok"}, 1.0)]
+    assert not mutated.exact
+    assert mutated.retained_probability_mass is None
+
+    appended = tb.copy()
+    appended.append(({"m": "ok"}, 0.1))
+    assert not appended.exact
+    assert appended.retained_probability_mass is None
+
+    sorted_copy = tb.copy()
+    sorted_copy.sort(key=lambda item: item[1])
+    assert not sorted_copy.exact
+    assert sorted_copy.retained_probability_mass is None

@@ -23,6 +23,29 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   Static persistence is lowered directly without creating an invalid
   one-value transition selector, and detailed planner results report the
   implicit transition as a zero-cost noop.
+- **GAP-015 — tracked-belief metadata preservation:** `TrackedBelief.copy()`
+  and slicing now return metadata-preserving `TrackedBelief` instances, so a
+  routine copy can no longer silently upgrade a beam-scoped certificate to
+  `caller-supplied-belief`. In-place mutation (`belief[:] = ...`, `append`,
+  `sort`, and the other mutating list methods) invalidates exactness and
+  retained mass instead of reporting stale guarantees. `list(belief)` remains
+  the explicit way to obtain an unscoped plain list.
+- **GAP-016 — callback probability contract:** `outcome_model` and
+  `observation_model` probabilities must now sum to 1 within `1e-6` relative
+  tolerance. Subnormalized, supernormalized, and zero totals raise a
+  `ValueError` naming the state, action, and observed total instead of being
+  silently rescaled, which previously masked forgotten outcome branches.
+  Input belief masses are unchanged: they remain validated, normalized
+  relative weights.
+- **GAP-018 — policy observation routing:** `BeliefPolicyNode.continuation()`
+  now projects the supplied observation onto the node's observation schema,
+  so telemetry mappings carrying extra sensor fields match their retained
+  branch instead of silently routing to the pruned-observation fallback.
+  Mappings missing schema keys raise `KeyError` — a shape mismatch is an
+  integration error, not a low-probability observation. New
+  `BeliefPolicyNode.observation_schema` exposes the required keys, and
+  `route()` returns a structured `BeliefPolicyRouting` reporting exact,
+  fallback, terminal, or unmatched routing with the projected observation.
 
 ### Added
 
@@ -102,6 +125,24 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   generated candidates, replay/evaluation time, retained mass, certificate
   scope, and regret.
   Exact fallback remains deliberate and respects `max_exact_states`.
+- **GAP-017 — planning cooperative controls:** `plan_belief()` accepts an
+  optional `PlanControl` with cooperative `timeout_seconds`/`deadline`
+  limits, a cancellation callback, and progress callbacks receiving
+  `PlanningStats` snapshots (elapsed time, policy-node/outcome/observation
+  counts, and the best fully evaluated root action so far), mirroring
+  `CompileControl` for compilation. Cancellation raises `PlanningCancelled`;
+  time budgets raise `PlanningBudgetExceeded`. The existing hard
+  `max_action_sequences`/`max_outcome_branches`/`max_policy_nodes`/
+  `max_observation_branches` caps now also raise `PlanningBudgetExceeded`
+  carrying partial statistics; it subclasses `ValueError`, so existing
+  handlers keep working.
+- **GAP-020 — policy-branch posterior explainability:** every retained
+  `BeliefPolicyBranch` now exposes the normalized observation-conditioned
+  `posterior` the planner optimized its continuation against, plus a
+  `posterior_marginals()` convenience. The aggregated pruned-observation
+  fallback is exposed as `BeliefPolicyNode.fallback_branch` with its
+  aggregate posterior and the `contributing_observations` merged into it;
+  `route()` returns that branch for fallback routing.
 
 ### Documentation and examples
 
@@ -125,13 +166,22 @@ Notable user-facing changes are recorded here for inclusion in release notes.
 - Updated the microgrid controller and tracker-refinement experiment to
   retain history, replay an uncertified beam at explicit exact capacity, and
   expose the resulting computational work and certificate transition.
+- Documented the tracked-belief copy/mutation contract, the strict callback
+  probability contract, `PlanControl` cooperative planning controls, policy
+  observation routing, and branch posteriors in the README and docstrings.
+- Updated the belief-metadata, validation-edge, operational-control,
+  observation-routing, and branch-explainability experiments and their lab
+  reports to validate the fixed behavior.
 - Updated the black-box edge-case experiment and archived GAP-001 through
-  GAP-014 under `modenexus_apps/gaps/fixed`.
+  GAP-018 and GAP-020 under `modenexus_apps/gaps/fixed`; GAP-019
+  (belief-planning reliability constraints) remains open pending design.
 
 ### Verification
 
-- ModeNexus test suite: **312 passed, 7 skipped**.
+- ModeNexus test suite: **369 passed, 1 skipped** (PyTorch available in the
+  verification environment; the single skip needs an external c2d binary).
 - Black-box API edge-case checks: all fixed cases report `OK`.
-- Companion applications: all **40 non-PyTorch tests passed**. The optional
-  PyTorch verification was not run because PyTorch was unavailable in the
-  verification environment.
+- Companion applications: all **49 tests passed**, including the updated
+  belief-metadata, validation-edge, operational-control,
+  observation-routing, and branch-explainability reproducers asserting the
+  fixed behavior.

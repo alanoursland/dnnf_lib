@@ -2,7 +2,14 @@ import math
 
 import pytest
 
-from modenexus import Planner, TrackedBelief, iff
+from modenexus import (
+    PlanControl,
+    Planner,
+    PlanningBudgetExceeded,
+    PlanningCancelled,
+    TrackedBelief,
+    iff,
+)
 
 
 def repair_planner(horizon=1):
@@ -400,3 +407,261 @@ def test_plan_belief_validates_joint_belief(belief):
             belief=belief,
             target={"done": True},
         )
+
+
+@pytest.mark.parametrize(
+    "probabilities",
+    [
+        (0.25, 0.25),
+        (2.0, 2.0),
+        (0.0, 0.0),
+    ],
+)
+def test_plan_belief_rejects_unnormalized_outcome_probabilities(
+    probabilities,
+):
+    def outcomes(state, command):
+        del state, command
+        return [({"mode": "goal"}, probabilities[0]), ({}, probabilities[1])]
+
+    with pytest.raises(ValueError, match="must sum to 1"):
+        repair_planner().plan_belief(
+            belief=[({"mode": "a"}, 1.0)],
+            target={"done": True},
+            outcome_model=outcomes,
+        )
+
+
+def test_plan_belief_accepts_normalized_outcome_probabilities():
+    def outcomes(state, command):
+        del state, command
+        return [({"mode": "goal"}, 0.25), ({}, 0.75)]
+
+    result = repair_planner().plan_belief(
+        belief=[({"mode": "a"}, 1.0)],
+        target={"done": True},
+        outcome_model=outcomes,
+        actions=["fix_a"],
+    )
+    assert result.expected_goal_probability == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize(
+    "probabilities",
+    [
+        (0.25, 0.25),
+        (2.0, 2.0),
+        (0.0, 0.0),
+    ],
+)
+def test_plan_belief_rejects_unnormalized_observation_probabilities(
+    probabilities,
+):
+    def observations(state, command):
+        del command
+        return [
+            ({"reading": state["mode"]}, probabilities[0]),
+            ({"reading": "other"}, probabilities[1]),
+        ]
+
+    with pytest.raises(ValueError, match="must sum to 1"):
+        repair_planner(horizon=2).plan_belief(
+            belief=[({"mode": "a"}, 1.0)],
+            target={"done": True},
+            outcome_model=repair_outcomes,
+            observation_model=observations,
+        )
+
+
+def test_plan_belief_can_be_cancelled_cooperatively():
+    with pytest.raises(PlanningCancelled) as exc:
+        repair_planner(horizon=2).plan_belief(
+            belief=[({"mode": "a"}, 1.0)],
+            target={"done": True},
+            outcome_model=repair_outcomes,
+            observation_model=lambda state, command: dict(state),
+            control=PlanControl(cancel=lambda: True),
+        )
+    assert not exc.value.stats.complete
+    assert exc.value.stats.elapsed_seconds >= 0
+
+
+def test_plan_belief_honors_time_budget():
+    with pytest.raises(PlanningBudgetExceeded) as exc:
+        repair_planner(horizon=2).plan_belief(
+            belief=[({"mode": "a"}, 1.0)],
+            target={"done": True},
+            outcome_model=repair_outcomes,
+            observation_model=lambda state, command: dict(state),
+            control=PlanControl(timeout_seconds=0.0),
+        )
+    assert isinstance(exc.value, ValueError)
+    assert not exc.value.stats.complete
+
+
+def test_plan_belief_reports_progress_and_final_stats():
+    snapshots = []
+    result = repair_planner(horizon=2).plan_belief(
+        belief=[({"mode": "a"}, 1.0)],
+        target={"done": True},
+        outcome_model=repair_outcomes,
+        observation_model=lambda state, command: dict(state),
+        control=PlanControl(
+            progress=snapshots.append, progress_interval=0.0
+        ),
+    )
+    assert result.action is not None
+    final = snapshots[-1]
+    assert final.complete
+    assert final.policy_nodes > 0
+    assert final.outcome_branches > 0
+    assert final.best_action == result.action
+    assert final.best_expected_utility == pytest.approx(
+        max(
+            evaluation.expected_utility
+            for evaluation in result.evaluations
+        )
+    )
+
+
+def test_policy_routing_projects_superset_and_rejects_partial():
+    def observations(state, command):
+        del command
+        if state["mode"] == "goal":
+            return {"signal": "goal"}
+        expected = state["mode"]
+        other = "b" if expected == "a" else "a"
+        return [
+            ({"signal": expected}, 0.99),
+            ({"signal": other}, 0.01),
+        ]
+
+    result = repair_planner(horizon=2).plan_belief(
+        belief=[({"mode": "a"}, 0.5), ({"mode": "b"}, 0.5)],
+        target={"done": True},
+        outcome_model=repair_outcomes,
+        observation_model=observations,
+        min_observation_probability=0.01,
+    )
+    root = result.policy
+    assert root.observation_schema == ("signal",)
+    branch = root.branches[0]
+
+    exact = root.route(branch.observation)
+    assert exact.kind == "exact"
+    assert exact.policy is branch.policy
+    assert exact.branch is branch
+
+    superset = dict(branch.observation)
+    superset["unrelated_telemetry"] = 42.0
+    routed = root.route(superset)
+    assert routed.kind == "exact"
+    assert routed.policy is branch.policy
+    assert root.continuation(superset) is branch.policy
+
+    with pytest.raises(KeyError, match="missing planner schema keys"):
+        root.route({"unrelated_telemetry": 42.0})
+    with pytest.raises(KeyError, match="missing planner schema keys"):
+        root.continuation({})
+
+    fallback = root.route({"signal": "not-a-known-reading"})
+    assert fallback.kind == "fallback"
+    assert fallback.policy is root.fallback_policy
+
+
+def test_policy_routing_reports_terminal_and_unmatched():
+    result = repair_planner(horizon=2).plan_belief(
+        belief=[({"mode": "a"}, 1.0)],
+        target={"done": True},
+        outcome_model=repair_outcomes,
+        observation_model=lambda state, command: dict(state),
+    )
+    leaf = result.policy.branches[0].policy
+    terminal = leaf.route({"anything": 1})
+    assert terminal.kind == "terminal"
+    assert terminal.policy is None
+
+    unpruned_root = result.policy
+    assert unpruned_root.fallback_policy is None
+    unmatched = unpruned_root.route(
+        {key: "no-such-value" for key in unpruned_root.observation_schema}
+    )
+    assert unmatched.kind == "unmatched"
+    assert unmatched.policy is None
+
+
+def test_policy_branches_expose_their_posterior():
+    result = repair_planner(horizon=2).plan_belief(
+        belief=[({"mode": "a"}, 0.5), ({"mode": "b"}, 0.5)],
+        target={"done": True},
+        outcome_model=repair_outcomes,
+        observation_model=lambda state, command: dict(state),
+    )
+    for branch in result.policy.branches:
+        assert branch.posterior
+        total = sum(probability for _, probability in branch.posterior)
+        assert total == pytest.approx(1.0)
+        marginals = branch.posterior_marginals()
+        assert "mode" in marginals
+        assert sum(marginals["mode"].values()) == pytest.approx(1.0)
+
+    # Perfect observation of a two-state belief: each branch's posterior
+    # collapses to the single observed state.
+    branch = result.policy.branches[0]
+    assert len(branch.posterior) == 1
+    assert branch.posterior[0][1] == pytest.approx(1.0)
+    assert branch.posterior[0][0]["mode"] == branch.observation["mode"]
+
+
+def test_fallback_branch_exposes_aggregate_posterior():
+    def observations(state, command):
+        del command
+        if state["mode"] == "goal":
+            return {"signal": "goal"}
+        expected = state["mode"]
+        other = "b" if expected == "a" else "a"
+        return [
+            ({"signal": expected}, 0.99),
+            ({"signal": other}, 0.01),
+        ]
+
+    result = repair_planner(horizon=2).plan_belief(
+        belief=[({"mode": "a"}, 0.5), ({"mode": "b"}, 0.5)],
+        target={"done": True},
+        outcome_model=repair_outcomes,
+        observation_model=observations,
+        min_observation_probability=0.01,
+    )
+    root = result.policy
+    fallback = root.fallback_branch
+    assert fallback is not None
+    assert fallback.policy is root.fallback_policy
+    assert fallback.probability == pytest.approx(
+        root.discarded_observation_probability
+    )
+    assert fallback.posterior
+    assert sum(
+        probability for _, probability in fallback.posterior
+    ) == pytest.approx(1.0)
+    assert fallback.contributing_observations
+    for observation in fallback.contributing_observations:
+        assert "signal" in observation
+
+    routed = root.route({"signal": "not-a-known-reading"})
+    assert routed.kind == "fallback"
+    assert routed.branch is fallback
+
+
+def test_plan_belief_budget_error_carries_partial_stats():
+    with pytest.raises(PlanningBudgetExceeded) as exc:
+        repair_planner(horizon=2).plan_belief(
+            belief=[({"mode": "a"}, 1.0)],
+            target={"done": True},
+            outcome_model=repair_outcomes,
+            observation_model=lambda state, command: dict(state),
+            max_policy_nodes=2,
+        )
+    assert isinstance(exc.value, ValueError)
+    stats = exc.value.stats
+    assert stats.policy_nodes > 2
+    assert not stats.complete

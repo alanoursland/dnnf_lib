@@ -35,7 +35,7 @@ CHAPTERS = sorted(
 
 
 def blocks(path):
-    text = open(path).read()
+    text = open(path, encoding="utf-8").read()
     return re.findall(r"```python\n(.*?)```", text, flags=re.S)
 
 

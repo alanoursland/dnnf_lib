@@ -143,7 +143,10 @@ computes the required joint-state capacity automatically, guarded by
 expansion/beam truncation and retained-mass diagnostics.
 `ModeTracker.belief()` returns a list-compatible `TrackedBelief` carrying
 exactness and retained-mass metadata, so downstream planners can distinguish
-an exact posterior from a normalized truncated beam.
+an exact posterior from a normalized truncated beam. `copy()` and slicing
+preserve that metadata, in-place mutation invalidates it, and `list(belief)`
+is the explicit way to drop it — a routine container operation can no longer
+flip a certificate.
 For adaptive deployments, construct the tracker with
 `retain_history=True`. `tracker.refine(beam=..., expand=...)` returns a
 fresh tracker rebuilt from the original prior and all retained evidence and
@@ -171,7 +174,14 @@ and other model costs.
 For one-step decisions under uncertainty, `plan_belief()` accepts the
 correlated joint distribution returned by `ModeTracker.belief()` and ranks
 actions by exact expected goal probability or expected utility. Applications
-may supply stochastic action outcomes and separate operational costs.
+may supply stochastic action outcomes and separate operational costs;
+outcome and observation callback probabilities must sum to 1 (within
+`1e-6`), so a forgotten branch fails loudly instead of being silently
+renormalized. An optional `PlanControl` adds cooperative
+timeout/deadline limits, a cancellation callback, and progress snapshots
+(`PlanningStats`) mirroring `CompileControl`; interrupted searches raise
+`PlanningCancelled`/`PlanningBudgetExceeded` carrying the partial counts
+and best root action found so far.
 On planners compiled with a longer horizon, it performs bounded lookahead
 over command sequences, propagates stochastic outcome branches, and returns
 the best `BeliefPolicyResult`; sequence and branch budgets make the
@@ -191,11 +201,21 @@ so the same surface represents perfect, partial, or noisy sensing.
 result reports all three realized expansion counts. Observations after the
 final action are not expanded because no decision remains.
 
+Each retained `BeliefPolicyBranch` exposes the normalized posterior the
+planner optimized against (plus `posterior_marginals()`), so an operator
+can inspect which hidden states justified a branch's action without
+re-deriving the Bayes update. At execution time,
+`BeliefPolicyNode.route(observation)` projects telemetry onto the node's
+`observation_schema` (extra sensor fields are ignored, missing schema keys
+raise) and reports exact, fallback, terminal, or unmatched routing;
+`continuation()` remains the compact accessor on top of it.
+
 For noisy sensors with many low-probability readings, set
 `min_observation_probability` and/or `max_observations_per_node`. Pruned
 readings are merged into an optimized fallback posterior rather than
-dropped, and `BeliefPolicyNode.continuation()` routes unmatched observations
-through that fallback. Results report generated and pruned branches,
+dropped and exposed as `fallback_branch` with its aggregate posterior and
+contributing observations; well-formed readings matching no retained branch
+route through that fallback. Results report generated and pruned branches,
 retained/discarded observation probability, whether action ranking is
 heuristic or certified, and whether the returned utility is a lower bound
 on the exact full-observation optimum. Every evaluated root action exposes
