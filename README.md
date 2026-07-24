@@ -182,8 +182,11 @@ readings are merged into an optimized fallback posterior rather than
 dropped, and `BeliefPolicyNode.continuation()` routes unmatched observations
 through that fallback. Results report generated and pruned branches,
 retained/discarded observation probability, whether action ranking is
-heuristic, and whether the returned utility is a lower bound on the exact
-full-observation optimum.
+heuristic or certified, and whether the returned utility is a lower bound
+on the exact full-observation optimum. Every evaluated root action exposes
+utility lower and upper bounds. The overall result reports the unrestricted
+optimal-utility upper bound and maximum root-action regret; the root action
+is certified when its lower bound dominates every alternative upper bound.
 
 ## GPU / batched evaluation (PyTorch)
 

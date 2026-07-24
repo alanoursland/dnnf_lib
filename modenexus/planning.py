@@ -175,6 +175,7 @@ class BeliefPolicyNode:
     expected_goal_probability: float
     expected_action_cost: float
     expected_utility: float
+    utility_upper_bound: float
     branches: Tuple[BeliefPolicyBranch, ...]
     fallback_policy: Optional["BeliefPolicyNode"]
     retained_observation_probability: float
@@ -190,6 +191,11 @@ class BeliefPolicyNode:
                 return branch.policy
         return self.fallback_policy
 
+    @property
+    def utility_lower_bound(self) -> float:
+        """Value of this executable policy under its observation fallback."""
+        return self.expected_utility
+
 
 @dataclass(frozen=True)
 class ConditionalBeliefPolicyResult:
@@ -198,7 +204,9 @@ class ConditionalBeliefPolicyResult:
     Approximate results preserve all probability mass by merging pruned
     observations into fallback posteriors. Their utility is the exact value
     of that coarsened policy and a lower bound on the unrestricted
-    full-observation optimum; root action ranking is heuristic.
+    full-observation optimum. Per-action upper bounds use the maximum
+    remaining reward on collapsed branches. Root ranking is certified when
+    the selected lower bound dominates every alternative upper bound.
     """
 
     policy: BeliefPolicyNode
@@ -212,6 +220,9 @@ class ConditionalBeliefPolicyResult:
     approximation: str
     action_ranking: str
     utility_is_lower_bound: bool
+    optimal_utility_upper_bound: float
+    maximum_regret: float
+    root_action_certified: bool
     observation_branching: bool = True
 
     @property
@@ -231,6 +242,15 @@ class ConditionalBeliefPolicyResult:
     @property
     def expected_utility(self) -> float:
         return self.policy.expected_utility
+
+    @property
+    def utility_lower_bound(self) -> float:
+        return self.policy.utility_lower_bound
+
+    @property
+    def utility_upper_bound(self) -> float:
+        """Upper bound for the selected root action's unrestricted policy."""
+        return self.policy.utility_upper_bound
 
     @property
     def discarded_observation_probability(self) -> float:
@@ -600,7 +620,8 @@ class CompiledPlanner:
         into one fallback posterior rather than removed from the expected
         value. The returned policy routes unmatched observations through
         ``BeliefPolicyNode.fallback_policy`` and reports retained probability
-        mass, pruning counts, and heuristic action-ranking status.
+        mass, pruning counts, per-action utility bounds, maximum regret, and
+        exact, certified, or heuristic root-action ranking.
 
         Utility is ``goal_reward * P(target) - cost_weight * action_cost``.
         For a single command variable, ``action_costs`` is either a mapping
@@ -978,6 +999,10 @@ class CompiledPlanner:
                                     goal_reward * expected_goal
                                     - cost_weight * immediate_cost
                                 ),
+                                utility_upper_bound=(
+                                    goal_reward * expected_goal
+                                    - cost_weight * immediate_cost
+                                ),
                                 branches=(),
                                 fallback_policy=None,
                                 retained_observation_probability=1.0,
@@ -1069,6 +1094,7 @@ class CompiledPlanner:
                     branches: List[BeliefPolicyBranch] = []
                     expected_goal = 0.0
                     expected_continuation_cost = 0.0
+                    continuation_utility_upper_bound = 0.0
                     retained_path_probability = 0.0
 
                     def account_observation_branch() -> None:
@@ -1099,6 +1125,9 @@ class CompiledPlanner:
                         expected_goal += probability * branch_goal
                         expected_continuation_cost += (
                             probability * branch_cost
+                        )
+                        continuation_utility_upper_bound += (
+                            probability * child.utility_upper_bound
                         )
                         retained_path_probability += (
                             probability
@@ -1153,6 +1182,9 @@ class CompiledPlanner:
                             discarded_probability
                             * fallback_policy.expected_action_cost
                         )
+                        continuation_utility_upper_bound += (
+                            discarded_probability * goal_reward
+                        )
 
                     expected_cost = (
                         immediate_cost + expected_continuation_cost
@@ -1166,6 +1198,10 @@ class CompiledPlanner:
                             expected_utility=(
                                 goal_reward * expected_goal
                                 - cost_weight * expected_cost
+                            ),
+                            utility_upper_bound=(
+                                continuation_utility_upper_bound
+                                - cost_weight * immediate_cost
                             ),
                             branches=tuple(
                                 sorted(
@@ -1195,6 +1231,24 @@ class CompiledPlanner:
             best_policy, root_evaluations = solve_conditional_policy(
                 checked_states, 0
             )
+            is_approximate = (
+                counters["pruned_observation_branches"] > 0
+            )
+            alternative_upper_bound = max(
+                (
+                    evaluation.utility_upper_bound
+                    for evaluation in root_evaluations[1:]
+                ),
+                default=-math.inf,
+            )
+            maximum_regret = max(
+                0.0,
+                alternative_upper_bound
+                - best_policy.utility_lower_bound,
+            )
+            if maximum_regret <= 1e-12:
+                maximum_regret = 0.0
+            root_action_certified = maximum_regret == 0.0
             return ConditionalBeliefPolicyResult(
                 policy=best_policy,
                 evaluations=root_evaluations,
@@ -1214,17 +1268,25 @@ class CompiledPlanner:
                 ),
                 approximation=(
                     "observation-pruned"
-                    if counters["pruned_observation_branches"] > 0
+                    if is_approximate
                     else "exact"
                 ),
                 action_ranking=(
-                    "heuristic"
-                    if counters["pruned_observation_branches"] > 0
-                    else "exact"
+                    "exact"
+                    if not is_approximate
+                    else (
+                        "certified"
+                        if root_action_certified
+                        else "heuristic"
+                    )
                 ),
-                utility_is_lower_bound=(
-                    counters["pruned_observation_branches"] > 0
+                utility_is_lower_bound=is_approximate,
+                optimal_utility_upper_bound=max(
+                    evaluation.utility_upper_bound
+                    for evaluation in root_evaluations
                 ),
+                maximum_regret=maximum_regret,
+                root_action_certified=root_action_certified,
             )
 
         if self.horizon > 1:

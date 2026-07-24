@@ -77,6 +77,14 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   generated/pruned branch counts, retained/discarded probability,
   exact-versus-heuristic action ranking, and lower-bound status. Existing
   hard node and branch budgets remain available.
+- **GAP-012 — approximate action certificates:** every conditional root
+  evaluation now exposes utility lower and upper bounds. Approximate results
+  report the unrestricted optimal-utility upper bound, maximum possible
+  root-action regret, and `root_action_certified`. A pruned result uses
+  `action_ranking="certified"` when its selected lower bound dominates every
+  alternative upper bound; otherwise it remains explicitly `"heuristic"`.
+  Bounds use the maximum remaining reward on collapsed observation branches
+  and require no exact reference run.
 
 ### Documentation and examples
 
@@ -93,13 +101,15 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   tree against its independent exhaustive evaluator.
 - Updated the noisy-observation scaling experiment and conditional
   controller to use explicit observation pruning with fallback behavior.
+- Updated the pruning-tradeoff experiment to compare retrospective exact
+  regret with the public worst-case regret certificate.
 - Updated the black-box edge-case experiment and archived GAP-001 through
-  GAP-011 under `modenexus_apps/gaps/fixed`.
+  GAP-012 under `modenexus_apps/gaps/fixed`.
 
 ### Verification
 
 - ModeNexus test suite: **309 passed, 7 skipped**.
 - Black-box API edge-case checks: all fixed cases report `OK`.
-- Companion applications: all **37 non-PyTorch tests passed**. The optional
+- Companion applications: all **38 non-PyTorch tests passed**. The optional
   PyTorch verification was not run because PyTorch was unavailable in the
   verification environment.

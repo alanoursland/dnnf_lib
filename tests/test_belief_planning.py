@@ -279,8 +279,14 @@ def test_plan_belief_prunes_rare_observations_into_fallback():
 
     assert result.action == {"action": "fix_a"}
     assert result.approximation == "observation-pruned"
-    assert result.action_ranking == "heuristic"
+    assert result.action_ranking == "certified"
     assert result.utility_is_lower_bound
+    assert result.root_action_certified
+    assert result.maximum_regret == pytest.approx(0.0)
+    assert result.utility_lower_bound <= result.utility_upper_bound
+    assert result.optimal_utility_upper_bound >= (
+        result.utility_lower_bound
+    )
     assert result.retained_observation_probability == pytest.approx(0.995)
     assert result.discarded_observation_probability == pytest.approx(0.005)
     assert result.pruned_observation_branch_count > 0
@@ -291,6 +297,20 @@ def test_plan_belief_prunes_rare_observations_into_fallback():
     assert result.policy.continuation(
         {"signal": "a"}
     ) is result.policy.fallback_policy
+
+    aggressive = planner.plan_belief(
+        belief=[({"mode": "a"}, 0.5), ({"mode": "b"}, 0.5)],
+        target={"done": True},
+        outcome_model=repair_outcomes,
+        observation_model=observations,
+        action_costs={"none": 0.0, "fix_a": 0.0, "fix_b": 0.2},
+        cost_weight=0.1,
+        max_observations_per_node=1,
+    )
+    assert aggressive.action_ranking == "heuristic"
+    assert not aggressive.root_action_certified
+    assert aggressive.maximum_regret == pytest.approx(0.005)
+    assert aggressive.optimal_utility_upper_bound == pytest.approx(1.0)
 
 
 def test_plan_belief_skips_observations_after_final_action():
@@ -310,6 +330,11 @@ def test_plan_belief_skips_observations_after_final_action():
     assert result.approximation == "exact"
     assert result.action_ranking == "exact"
     assert not result.utility_is_lower_bound
+    assert result.root_action_certified
+    assert result.maximum_regret == pytest.approx(0.0)
+    assert result.utility_lower_bound == pytest.approx(
+        result.utility_upper_bound
+    )
     assert result.retained_observation_probability == pytest.approx(1.0)
     assert len(calls) == 6
     assert all(not branch.policy.branches for branch in result.policy.branches)
