@@ -144,3 +144,36 @@ def test_belief_collapse_raises():
     tracker.step({"alarm": False})
     with pytest.raises(ValueError):
         tracker.step({"alarm": True})
+
+
+def test_exact_mode_sizes_beam_from_joint_state_space():
+    m = SystemModel()
+    m.mode("a", ("x", "y", "z"), priors=(1, 1, 1))
+    m.mode("b", ("u", "v"), priors=(1, 1))
+    tracker = ModeTracker(m.compile(), exact=True)
+    assert tracker.joint_state_count == 6
+    assert tracker.beam == 6
+    assert tracker.expand == 6
+    assert tracker.is_exact
+    tracker.step({})
+    assert tracker.last_step_info.exact
+    assert tracker.last_step_info.retained_probability_mass == pytest.approx(1)
+
+
+def test_exact_mode_has_configurable_state_guard():
+    m = SystemModel()
+    m.mode("a", ("x", "y", "z"), priors=(1, 1, 1))
+    m.mode("b", ("u", "v"), priors=(1, 1))
+    with pytest.raises(ValueError, match="6 joint states"):
+        ModeTracker(m.compile(), exact=True, max_exact_states=5)
+
+
+def test_step_info_reports_approximation():
+    m = SystemModel()
+    m.mode("m", ("a", "b", "c"), priors=(0.6, 0.3, 0.1))
+    tracker = ModeTracker(m.compile(), beam=1, expand=1)
+    tracker.step({})
+    info = tracker.last_step_info
+    assert info.expansion_truncated
+    assert info.retained_probability_mass is None
+    assert not info.exact

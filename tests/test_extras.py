@@ -56,6 +56,24 @@ def test_voi_zero_when_nothing_to_learn():
         assert voi == pytest.approx(0.0, abs=1e-12)
 
 
+def test_voi_filters_explicitly_observed_candidates():
+    sys = build_two_valve()
+    assert sys.value_of_information(
+        {"flow_out": False}, candidates=["flow_out"]
+    ) == []
+
+
+def test_voi_filters_observed_finite_domain_candidates():
+    m = SystemModel()
+    mode = m.mode("component", ("ok", "bad"), priors=(0.9, 0.1))
+    status = m.finite("status", ("green", "red"))
+    m.add(iff(status == "red", mode == "bad"))
+    sys = m.compile()
+    assert sys.value_of_information(
+        {"status": "green"}, candidates=["status"]
+    ) == []
+
+
 def test_c2d_driver_missing_binary_raises():
     from modenexus.external import compile_with_c2d
 

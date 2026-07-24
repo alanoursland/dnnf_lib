@@ -31,12 +31,28 @@ outside the beam is dropped (renormalized away).
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from .diagnosis import CompiledSystem, EvidenceValue
 
 ModeAssignment = Tuple[Tuple[str, str], ...]  # sorted ((var, value), ...)
 Transitions = Dict[str, Dict[str, Dict[str, float]]]
+
+
+@dataclass(frozen=True)
+class TrackingStepInfo:
+    """Diagnostics for the most recent filtering step."""
+
+    timestep: int
+    joint_state_count: int
+    previous_states: int
+    generated_candidates: int
+    retained_states: int
+    expansion_truncated: bool
+    beam_truncated: bool
+    retained_probability_mass: Optional[float]
+    exact: bool
 
 
 def _logsumexp(values: List[float]) -> float:
@@ -71,19 +87,59 @@ class ModeTracker:
     expand:
         Successors proposed per belief particle per step (defaults to
         ``beam``).
+    exact:
+        Size ``beam`` and ``expand`` to the full Cartesian product of mode
+        domains.  This gives exact filtering while keeping the exponential
+        state-space requirement explicit in ``joint_state_count``.
+    max_exact_states:
+        Safety limit for ``exact=True``.  Raise it deliberately when the
+        computed state-space size is acceptable for the deployment.
+
+    ``last_step_info`` reports whether expansion or final beam selection
+    truncated an approximate update.  Retained probability mass is reported
+    whenever all successor expansions were enumerated.
     """
 
     def __init__(
         self,
         system: CompiledSystem,
         transitions: Optional[Transitions] = None,
-        beam: int = 10,
+        beam: Optional[int] = None,
         expand: Optional[int] = None,
         transition_fn=None,
+        exact: bool = False,
+        max_exact_states: int = 100_000,
     ):
         self.system = system
-        self.beam = beam
-        self.expand = expand or beam
+        self.joint_state_count = math.prod(
+            len(system.finites[name].values) for name in system.mode_vars
+        )
+        if exact:
+            if self.joint_state_count > max_exact_states:
+                raise ValueError(
+                    f"exact tracking needs {self.joint_state_count} joint "
+                    f"states, exceeding max_exact_states={max_exact_states}"
+                )
+            if beam is not None and beam < self.joint_state_count:
+                raise ValueError(
+                    f"exact tracking requires beam >= "
+                    f"{self.joint_state_count}"
+                )
+            if expand is not None and expand < self.joint_state_count:
+                raise ValueError(
+                    f"exact tracking requires expand >= "
+                    f"{self.joint_state_count}"
+                )
+            beam = self.joint_state_count
+            expand = self.joint_state_count
+        self.beam = 10 if beam is None else beam
+        self.expand = self.beam if expand is None else expand
+        if self.beam < 1 or self.expand < 1:
+            raise ValueError("beam and expand must be positive")
+        self.is_exact = (
+            self.beam >= self.joint_state_count
+            and self.expand >= self.joint_state_count
+        )
         self.transition_fn = transition_fn
         transitions = transitions or {}
         for name, matrix in transitions.items():
@@ -100,6 +156,7 @@ class ModeTracker:
         # Belief: {mode assignment: log mass}, unnormalized.
         self._belief: Dict[ModeAssignment, float] = {}
         self.t = 0
+        self.last_step_info: Optional[TrackingStepInfo] = None
         self._init_belief()
 
     def _init_belief(self) -> None:
@@ -129,6 +186,8 @@ class ModeTracker:
         if transitions:
             step_transitions.update(transitions)
         candidates: Dict[ModeAssignment, List[float]] = {}
+        previous_states = len(self._belief)
+        expansion_truncated = False
         for modes_key, log_mass in self._belief.items():
             prev = dict(modes_key)
             mode_priors = {
@@ -149,7 +208,16 @@ class ModeTracker:
                 for mode_name, prev_name in self.system.prev_map.items():
                     step_evidence[prev_name] = prev[mode_name]
             log_w = self.system.log_weights_for(step_evidence, mode_priors)
-            for cost, modes in self.system.ranked_map(log_w, self.expand):
+            probe = (
+                self.expand
+                if self.expand >= self.joint_state_count
+                else self.expand + 1
+            )
+            successors = self.system.ranked_map(log_w, probe)
+            if len(successors) > self.expand:
+                expansion_truncated = True
+                successors = successors[:self.expand]
+            for cost, modes in successors:
                 key = tuple(sorted(modes.items()))
                 candidates.setdefault(key, []).append(log_mass - cost)
         merged = {
@@ -161,11 +229,28 @@ class ModeTracker:
                 "evidence inconsistent with all tracked trajectories; "
                 "increase beam or revisit the model"
             )
-        top = sorted(merged.items(), key=lambda kv: -kv[1])[: self.beam]
+        ranked = sorted(merged.items(), key=lambda kv: -kv[1])
+        beam_truncated = len(ranked) > self.beam
+        top = ranked[: self.beam]
         # Renormalize to keep log masses well-scaled over long runs.
         z = _logsumexp([v for _, v in top])
+        retained_probability_mass = None
+        if not expansion_truncated:
+            all_z = _logsumexp(list(merged.values()))
+            retained_probability_mass = math.exp(z - all_z)
         self._belief = {k: v - z for k, v in top}
         self.t += 1
+        self.last_step_info = TrackingStepInfo(
+            timestep=self.t,
+            joint_state_count=self.joint_state_count,
+            previous_states=previous_states,
+            generated_candidates=len(merged),
+            retained_states=len(top),
+            expansion_truncated=expansion_truncated,
+            beam_truncated=beam_truncated,
+            retained_probability_mass=retained_probability_mass,
+            exact=self.is_exact and not expansion_truncated and not beam_truncated,
+        )
         return self.belief()
 
     # ------------------------------------------------------------------

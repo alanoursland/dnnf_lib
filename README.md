@@ -52,6 +52,23 @@ for cost, model in modenexus.enumerate_models(circuit, costs, k=5):
     print(cost, model)
 ```
 
+Long offline compiles can be bounded and observed cooperatively:
+
+```python
+control = modenexus.CompileControl(
+    timeout_seconds=60,
+    max_nodes=100_000,
+    cancel=lambda: operator_cancelled(),
+    progress=lambda stats: print(stats),
+)
+circuit = modenexus.compile_cnf(cnf, smooth=True, control=control)
+```
+
+Cancellation and budget exceptions carry the last `CompilationStats`
+snapshot, making an expensive variable order measurable and safe to abandon
+without terminating the worker process. `compile_fd`, `SystemModel.compile`,
+and `Planner.compile` accept the same control object.
+
 DIMACS CNF (`modenexus.CNF.from_dimacs`) and the c2d `.nnf` circuit format
 (`modenexus.nnf_io`) are supported, so circuits from external compilers
 (c2d, dsharp, D4) plug into the same evaluators.
@@ -120,7 +137,10 @@ per-mode transition matrices, observations each timestep, and a
 beam-filtered belief over joint mode assignments (exact HMM filtering when
 the beam covers the mode space — see `examples/home_battery.py` for a
 degrading-battery week of telemetry, and `docs/MODELING_NOTES.md` for
-ergonomics findings from that experiment).
+ergonomics findings from that experiment). `ModeTracker(system, exact=True)`
+computes the required joint-state capacity automatically, guarded by
+`max_exact_states`; approximate trackers expose `last_step_info` with
+expansion/beam truncation and retained-mass diagnostics.
 
 Beyond ranked diagnoses: `value_of_information` scores which sensor to
 read next (expected entropy reduction, in nats),
@@ -128,6 +148,10 @@ read next (expected entropy reduction, in nats),
 `modenexus.Planner` unrolls the same model over an n-step horizon to
 estimate hidden state from a command/observation history and to plan
 command sequences that reach a goal — MEXEC-style, one circuit for both.
+The existing `plan()` and `estimate()` tuple APIs remain compact;
+`plan_detailed()` and `estimate_detailed()` additionally return the state
+trajectory and a breakdown of initial-state, per-transition, hard-evidence,
+and other model costs.
 
 ## GPU / batched evaluation (PyTorch)
 

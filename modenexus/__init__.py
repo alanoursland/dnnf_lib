@@ -27,6 +27,13 @@ GPU evaluation (requires ``pip install modenexus[torch]``)::
 from .circuit import Circuit, CircuitBuilder, lit_index
 from .cnf import CNF
 from .compiler import compile_cnf, minfill_order
+from .compile_control import (
+    CompilationBudgetExceeded,
+    CompilationCancelled,
+    CompilationInterrupted,
+    CompilationStats,
+    CompileControl,
+)
 from .diagnosis import CompiledSystem, Diagnosis, SystemModel
 from .eval import (
     condition_weights,
@@ -41,8 +48,14 @@ from .eval import (
 )
 from .formula import And, Formula, Not, Or, Prop, at_most_one, exactly_one, iff, xor
 from .kbest import enumerate_map, enumerate_models
-from .planning import Planner
-from .tracking import ModeTracker
+from .planning import (
+    EstimateResult,
+    PlanResult,
+    Planner,
+    PlannerCostBreakdown,
+    TransitionCost,
+)
+from .tracking import ModeTracker, TrackingStepInfo
 from . import nnf_io
 
 __version__ = "0.1.0"
@@ -52,6 +65,11 @@ __all__ = [
     "Circuit",
     "CircuitBuilder",
     "CompiledSystem",
+    "CompilationBudgetExceeded",
+    "CompilationCancelled",
+    "CompilationInterrupted",
+    "CompilationStats",
+    "CompileControl",
     "Diagnosis",
     "SystemModel",
     "And",
@@ -70,7 +88,12 @@ __all__ = [
     "enumerate_models",
     "minfill_order",
     "ModeTracker",
+    "TrackingStepInfo",
     "Planner",
+    "PlanResult",
+    "EstimateResult",
+    "PlannerCostBreakdown",
+    "TransitionCost",
     "is_satisfiable",
     "lit_index",
     "log_wmc",

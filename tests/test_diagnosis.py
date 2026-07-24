@@ -77,3 +77,58 @@ def test_diagnosis_state_includes_observables():
     sys = build_two_valve_system()
     diags = sys.diagnoses({"flow": False}, k=1)
     assert diags[0].state["flow"] is False
+
+
+@pytest.mark.parametrize(
+    "priors",
+    [
+        (1.0, -0.1),
+        (0.0, 0.0),
+        (1.0, math.inf),
+        (1.0, math.nan),
+    ],
+)
+def test_mode_priors_reject_invalid_relative_weights(priors):
+    m = SystemModel()
+    with pytest.raises(ValueError, match="component.*priors"):
+        m.mode("component", ("ok", "bad"), priors)
+
+
+def test_mode_priors_are_documented_relative_weights():
+    m = SystemModel()
+    m.mode("component", ("ok", "bad"), (0.9, 0.9))
+    sys = m.compile()
+    assert sys.mode_posteriors({})["component"] == pytest.approx(
+        {"ok": 0.5, "bad": 0.5}
+    )
+
+
+@pytest.mark.parametrize(
+    ("parameter", "value"),
+    [
+        ("false_positive", -0.1),
+        ("false_positive", 1.1),
+        ("false_positive", math.inf),
+        ("false_negative", -0.1),
+        ("false_negative", 1.1),
+        ("false_negative", math.nan),
+    ],
+)
+def test_sensor_rates_reject_invalid_probabilities(parameter, value):
+    m = SystemModel()
+    condition = m.bool("condition")
+    kwargs = {parameter: value}
+    with pytest.raises(ValueError, match=f"alarm {parameter}"):
+        m.sensor("alarm", condition, **kwargs)
+
+
+@pytest.mark.parametrize("rate", [0.0, 1.0])
+def test_sensor_rate_boundaries_are_valid(rate):
+    m = SystemModel()
+    condition = m.bool("condition")
+    m.sensor(
+        "alarm",
+        condition,
+        false_positive=rate,
+        false_negative=rate,
+    )

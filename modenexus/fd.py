@@ -36,6 +36,7 @@ from itertools import product
 from typing import Dict, FrozenSet, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from .circuit import AND, FALSE, LIT, OR, TRUE
+from .compile_control import CompileControl
 from .eval import _forward
 from .kbest import _NodeStream
 
@@ -381,9 +382,12 @@ class FDBuilder:
 # the compile-time constants live — the search itself is unchanged.
 # ----------------------------------------------------------------------
 class _FDCompiler:
-    def __init__(self, cnf: FDCnf, var_order: Optional[Sequence[int]]):
+    def __init__(
+        self, cnf: FDCnf, var_order: Optional[Sequence[int]], session=None
+    ):
         self.spec = cnf.spec
         self.var_order = var_order
+        self.session = session
         self.builder = FDBuilder(cnf.spec)
         self.table: List[FDClause] = []
         self.cvars: List[frozenset] = []
@@ -391,6 +395,11 @@ class _FDCompiler:
         # (clause id, var, val) -> new clause id, or -1 when satisfied
         self._assign_cache: Dict[Tuple[int, int, int], int] = {}
         self.memo: Dict[FrozenSet[int], int] = {}
+
+    @property
+    def cache_entries(self) -> int:
+        """Total entries across residual, conditioning, and clause caches."""
+        return len(self.memo) + len(self._assign_cache) + len(self.index)
 
     def intern(self, clause: FDClause) -> int:
         cid = self.index.get(clause)
@@ -503,26 +512,38 @@ class _FDCompiler:
         memo = self.memo
         stack: List[Tuple] = [("visit", root)]
         while stack:
+            if self.session is not None:
+                self.session.check(len(b.kinds), self.cache_entries)
             frame = stack.pop()
             tag = frame[0]
             if tag == "visit":
                 cids = frame[1]
                 if cids in memo:
+                    if self.session is not None:
+                        self.session.cache_hits += 1
                     continue
                 assigned, residual = self.bcp(cids)
                 if assigned is None:
                     memo[cids] = b.false()
                     continue
                 comps = self.components(residual)
+                if self.session is not None:
+                    self.session.components += len(comps)
                 stack.append(("finish_set", cids, assigned, comps))
                 for comp in comps:
                     if comp not in memo:
                         stack.append(("comp", comp))
+                    elif self.session is not None:
+                        self.session.cache_hits += 1
             elif tag == "comp":
                 comp = frame[1]
                 if comp in memo:
+                    if self.session is not None:
+                        self.session.cache_hits += 1
                     continue
                 var = self.pick_var(comp)
+                if self.session is not None:
+                    self.session.decisions += 1
                 subsets = [
                     self.assign_set(comp, var, val)
                     for val in range(self.spec.sizes[var])
@@ -556,6 +577,7 @@ def compile_fd(
     var_order: Optional[Sequence[int]] = None,
     smooth: bool = False,
     heuristic: str = "dynamic",
+    control: Optional[CompileControl] = None,
 ) -> FDCircuit:
     """Compile an FD-CNF to a finite-domain decision-DNNF.
 
@@ -566,6 +588,8 @@ def compile_fd(
     ``heuristic``: ``"dynamic"`` (most occurrences, default) or
     ``"minfill"`` (static, see :func:`minfill_order`); ignored when
     ``var_order`` is given.
+    ``control`` optionally supplies cooperative timeout/cancellation,
+    node/cache budgets, and progress reporting.
     """
     if var_order is None and heuristic == "minfill":
         var_order = minfill_order(cnf)
@@ -574,14 +598,27 @@ def compile_fd(
     elif var_order is None and heuristic != "dynamic":
         raise ValueError(f"unknown heuristic {heuristic!r}")
     spec = cnf.spec
+    session = control._start() if control is not None else None
+    if session is not None:
+        session.check(0, 0, force=True)
     if any(clause == () for clause in cnf.clauses):
         b = FDBuilder(spec)
-        return b.finish(b.false())
-    comp = _FDCompiler(cnf, var_order)
-    root = comp.solve(frozenset(comp.intern(c) for c in cnf.clauses))
+        circuit = b.finish(b.false())
+        if session is not None:
+            session.check(len(circuit), 0)
+            session.finish(len(circuit), 0)
+        return circuit
+    comp = _FDCompiler(cnf, var_order, session=session)
+    root_clauses = frozenset(comp.intern(c) for c in cnf.clauses)
+    if session is not None:
+        session.check(0, comp.cache_entries)
+    root = comp.solve(root_clauses)
     circuit = comp.builder.finish(root)
     if smooth:
         circuit = circuit.smooth()
+    if session is not None:
+        session.check(len(circuit), comp.cache_entries)
+        session.finish(len(circuit), comp.cache_entries)
     return circuit
 
 

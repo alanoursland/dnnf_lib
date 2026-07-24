@@ -86,3 +86,31 @@ def test_costs_pick_the_likelier_route():
     cost, steps = p.compile(horizon=1).plan({"m": "A"}, {"m": "B"})
     assert steps == [{"c": "safe"}]
     assert cost == pytest.approx(0.5, abs=1e-9)
+
+
+def test_detailed_plan_explains_prior_and_transition_costs():
+    p = Planner()
+    p.mode("m", ("A", "B"), priors=(0.9, 0.1))
+    p.command("c", ("go", "none"))
+    p.transition("m", "A", "B", command=("c", "go"), cost=0.7)
+    result = p.compile(horizon=1).plan_detailed(
+        current={"m": "A"}, target={"m": "B"}
+    )
+    assert result is not None
+    assert result.trajectory == [{"m": "A"}, {"m": "B"}]
+    assert result.costs.initial_state_cost == pytest.approx(-math.log(0.9))
+    assert result.costs.action_cost == pytest.approx(0.7)
+    assert result.costs.evidence_cost == 0.0
+    assert result.costs.other_model_cost == pytest.approx(0.0)
+    assert result.total_cost == pytest.approx(
+        result.costs.initial_state_cost + result.costs.action_cost
+    )
+    transition = result.costs.transition_costs[0]
+    assert transition.command == ("c", "go")
+    assert transition.frm == "A" and transition.to == "B"
+
+
+def test_planner_mode_priors_validate_at_declaration():
+    p = Planner()
+    with pytest.raises(ValueError, match="m.*priors"):
+        p.mode("m", ("A", "B"), priors=(1.0, -0.1))

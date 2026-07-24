@@ -26,10 +26,61 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 from . import fd
+from .compile_control import CompileControl
 from .fd import FDAtom, FDCircuit, FDCnf
 from .formula import Formula, Not, iff
 
 EvidenceValue = Union[bool, str, int, float]
+
+
+def _validate_probability(owner: str, parameter: str, value: float) -> float:
+    """Return a finite probability or raise a modeling-level error."""
+    try:
+        probability = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{owner} {parameter} must be a probability in [0, 1]; "
+            f"got {value!r}"
+        ) from None
+    if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+        raise ValueError(
+            f"{owner} {parameter} must be a finite probability in [0, 1]; "
+            f"got {value!r}"
+        )
+    return probability
+
+
+def _normalize_categorical_weights(
+    name: str, values: Sequence, priors: Sequence[float]
+) -> List[float]:
+    """Validate non-negative relative weights and normalize them to one."""
+    raw = list(priors)
+    if len(raw) != len(values):
+        raise ValueError(
+            f"{name!r} priors length must match its {len(values)} values; "
+            f"got {raw!r}"
+        )
+    numeric: List[float] = []
+    for weight in raw:
+        try:
+            number = float(weight)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{name!r} priors must be finite non-negative relative "
+                f"weights with a positive total; got {raw!r}"
+            ) from None
+        if not math.isfinite(number) or number < 0.0:
+            raise ValueError(
+                f"{name!r} priors must be finite non-negative relative "
+                f"weights with a positive total; got {raw!r}"
+            )
+        numeric.append(number)
+    total = sum(numeric)
+    if not math.isfinite(total) or total <= 0.0:
+        raise ValueError(
+            f"{name!r} priors must have a positive finite total; got {raw!r}"
+        )
+    return [weight / total for weight in numeric]
 
 
 class FiniteVar:
@@ -164,6 +215,7 @@ class SystemModel:
         fd_var = self.cnf.spec.add_var(2)
         v = self._register(FiniteVar(name, (False, True), fd_var))
         if prior is not None:
+            prior = _validate_probability(name, "prior", prior)
             self._prior_weights[self.cnf.spec.mvlit(fd_var, 0)] = 1.0 - prior
             self._prior_weights[self.cnf.spec.mvlit(fd_var, 1)] = prior
         return v == True  # noqa: E712
@@ -177,15 +229,15 @@ class SystemModel:
     ) -> FiniteVar:
         """Declare a finite-domain variable.  With ``mode=True`` (or when
         ``priors`` are given) it is a component mode: it appears in
-        diagnoses and its priors weight the enumeration."""
+        diagnoses and its priors weight the enumeration.  Priors are finite,
+        non-negative relative weights with a positive total and are
+        normalized automatically."""
         fd_var = self.cnf.spec.add_var(len(values))
         v = self._register(FiniteVar(name, values, fd_var))
         if priors is not None:
-            if len(priors) != len(values):
-                raise ValueError("priors length must match values")
-            total = sum(priors)
-            for i, p in enumerate(priors):
-                self._prior_weights[self.cnf.spec.mvlit(fd_var, i)] = p / total
+            normalized = _normalize_categorical_weights(name, values, priors)
+            for i, p in enumerate(normalized):
+                self._prior_weights[self.cnf.spec.mvlit(fd_var, i)] = p
         if mode or priors is not None:
             self._mode_vars.append(name)
         return v
@@ -212,11 +264,9 @@ class SystemModel:
         v = QuantizedVar(name, boundaries, fd_var)
         self._register(v)
         if priors is not None:
-            if len(priors) != len(v.values):
-                raise ValueError("priors length must match bucket count")
-            total = sum(priors)
-            for i, p in enumerate(priors):
-                self._prior_weights[self.cnf.spec.mvlit(fd_var, i)] = p / total
+            normalized = _normalize_categorical_weights(name, v.values, priors)
+            for i, p in enumerate(normalized):
+                self._prior_weights[self.cnf.spec.mvlit(fd_var, i)] = p
         if mode or priors is not None:
             self._mode_vars.append(name)
         return v
@@ -261,6 +311,12 @@ class SystemModel:
         ~expr) = false_positive``.  Hidden fault-injection variables
         (``_<name>_fp`` / ``_<name>_fn``) are excluded from reported
         states."""
+        false_positive = _validate_probability(
+            name, "false_positive", false_positive
+        )
+        false_negative = _validate_probability(
+            name, "false_negative", false_negative
+        )
         s = self.bool(name)
         true_when: Formula = expr
         if false_negative > 0.0:
@@ -278,14 +334,19 @@ class SystemModel:
         self,
         var_order: Optional[Sequence[int]] = None,
         modes_first: bool = True,
+        control: Optional[CompileControl] = None,
     ) -> "CompiledSystem":
         """Compile to a smooth finite-domain d-DNNF.  With ``modes_first``
         (default) mode variables are branched above all others, enabling
-        exact marginal MAP (:meth:`CompiledSystem.map_diagnoses`)."""
+        exact marginal MAP (:meth:`CompiledSystem.map_diagnoses`).
+        ``control`` optionally supplies cooperative compilation limits and
+        progress reporting."""
         fd.encode(self._constraints, self.cnf)
         if var_order is None and modes_first:
             var_order = [self.vars[n].fd_var for n in self._mode_vars]
-        circuit = fd.compile_fd(self.cnf, var_order=var_order, smooth=True)
+        circuit = fd.compile_fd(
+            self.cnf, var_order=var_order, smooth=True, control=control
+        )
         return CompiledSystem(
             circuit=circuit,
             variables=dict(self.vars),
@@ -310,6 +371,11 @@ class CompiledSystem:
         self.prev_map = prev_map or {}
         self._weights = [1.0] * circuit.spec.total
         for mvlit, w in prior_weights.items():
+            if not isinstance(w, (int, float)) or not math.isfinite(w) or w < 0:
+                raise ValueError(
+                    f"weight for leaf {mvlit} must be finite and non-negative; "
+                    f"got {w!r}"
+                )
             self._weights[mvlit] = w
         self._costs = [
             0.0 if w == 1.0 else (math.inf if w <= 0 else -math.log(w))
@@ -343,8 +409,13 @@ class CompiledSystem:
         if mode_priors:
             for name, dist in mode_priors.items():
                 var = self.vars[name]
-                for i, value in enumerate(var.values):
-                    weights[spec.mvlit(var.fd_var, i)] = dist.get(value, 0.0)
+                normalized = _normalize_categorical_weights(
+                    name,
+                    var.values,
+                    [dist.get(value, 0.0) for value in var.values],
+                )
+                for i, probability in enumerate(normalized):
+                    weights[spec.mvlit(var.fd_var, i)] = probability
         for name, value in evidence.items():
             var = self.vars[name]
             lik = self._soft_likelihoods(var, value)
@@ -534,6 +605,8 @@ class CompiledSystem:
         Priors are updated in place (subsequent queries use them).
         Returns the log-likelihood trace.
         """
+        if not observations:
+            raise ValueError("observations must not be empty")
         fit_names = list(self.mode_vars if names is None else names)
         spec = self.circuit.spec
         history: List[float] = []
@@ -578,6 +651,8 @@ class CompiledSystem:
         masked log-WMC), writes them back, and returns the average
         log-likelihood trace.  Scales to large telemetry sets and GPU;
         requires torch."""
+        if not observations:
+            raise ValueError("observations must not be empty")
         from .torch_learn import PriorLearner
 
         return PriorLearner(self, names=names, device=device).fit(
@@ -655,13 +730,17 @@ class CompiledSystem:
         entropy; exact for a single mode variable).  Returns
         ``[(name, voi), ...]`` best first — "which sensor should I read
         next."  Candidates default to all unobserved non-hidden,
-        non-mode variables."""
+        non-mode variables.  Explicit candidates already fixed by
+        ``evidence`` are omitted because their remaining information value
+        is zero."""
         if candidates is None:
             candidates = [
                 n for n in self.vars
                 if n not in evidence and not n.startswith("_")
                 and n not in self.mode_vars and "@prev" not in n
             ]
+        else:
+            candidates = [name for name in candidates if name not in evidence]
 
         def entropy(ev) -> float:
             h = 0.0
@@ -767,6 +846,23 @@ class CompiledSystem:
             prev_map=doc["prev_map"],
         )
         system._weights = list(doc["weights"])
+        if len(system._weights) != circuit.spec.total or any(
+            not isinstance(weight, (int, float))
+            or not math.isfinite(weight)
+            or weight < 0.0
+            for weight in system._weights
+        ):
+            raise ValueError(f"compiled system {path} contains invalid weights")
+        for name in system.mode_vars:
+            var = system.vars[name]
+            row = [
+                system._weights[circuit.spec.mvlit(var.fd_var, i)]
+                for i in range(len(var.values))
+            ]
+            if sum(row) <= 0.0:
+                raise ValueError(
+                    f"compiled system {path} has zero-total priors for {name!r}"
+                )
         system._costs = [
             0.0 if w == 1.0 else (math.inf if w <= 0 else -math.log(w))
             for w in system._weights

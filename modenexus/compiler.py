@@ -29,6 +29,7 @@ from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from .circuit import Circuit, CircuitBuilder
 from .cnf import CNF
+from .compile_control import CompileControl
 
 Clause = Tuple[int, ...]
 ClauseSet = FrozenSet[Clause]
@@ -170,6 +171,7 @@ def compile_cnf(
     var_order: Optional[Sequence[int]] = None,
     smooth: bool = False,
     heuristic: str = "dynamic",
+    control: Optional[CompileControl] = None,
 ) -> Circuit:
     """Compile a CNF into a decision-DNNF circuit.
 
@@ -190,15 +192,24 @@ def compile_cnf(
         ``"minfill"`` — a static order from min-fill elimination on the
         primal graph (see :func:`minfill_order`), usually much better on
         structured instances.  Ignored when ``var_order`` is given.
+    control:
+        Optional timeout, cancellation callback, node/cache budgets, and
+        progress callback.  Interrupted exceptions carry partial statistics.
     """
     if var_order is None and heuristic == "minfill":
         var_order = minfill_order(cnf)
     elif var_order is None and heuristic != "dynamic":
         raise ValueError(f"unknown heuristic {heuristic!r}")
     builder = CircuitBuilder(cnf.num_vars)
+    session = control._start() if control is not None else None
+    if session is not None:
+        session.check(len(builder.kinds), 0, force=True)
     pre = _preprocess(cnf)
     if pre is None:
         circuit = builder.finish(builder.false())
+        if session is not None:
+            session.check(len(circuit), 0)
+            session.finish(len(circuit), 0)
         return circuit
     old_limit = sys.getrecursionlimit()
     sys.setrecursionlimit(max(old_limit, 10000 + 50 * cnf.num_vars))
@@ -206,18 +217,27 @@ def compile_cnf(
         memo: Dict[ClauseSet, int] = {}
 
         def solve(clauses: ClauseSet) -> int:
+            if session is not None:
+                session.check(len(builder.kinds), len(memo))
             cached = memo.get(clauses)
             if cached is not None:
+                if session is not None:
+                    session.cache_hits += 1
                 return cached
             implied, residual = _bcp(clauses)
             if implied is None:
                 node = builder.false()
             else:
                 parts = [builder.literal(l) for l in sorted(implied)]
-                for comp in _components(residual):
+                comps = _components(residual)
+                if session is not None:
+                    session.components += len(comps)
+                for comp in comps:
                     comp_node = memo.get(comp)
                     if comp_node is None:
                         v = _pick_var(comp, var_order)
+                        if session is not None:
+                            session.decisions += 1
                         pos = builder.and_(
                             [builder.literal(v), solve(_assign(comp, v))]
                         )
@@ -226,9 +246,13 @@ def compile_cnf(
                         )
                         comp_node = builder.or_([pos, neg])
                         memo[comp] = comp_node
+                    elif session is not None:
+                        session.cache_hits += 1
                     parts.append(comp_node)
                 node = builder.and_(parts)
             memo[clauses] = node
+            if session is not None:
+                session.check(len(builder.kinds), len(memo))
             return node
 
         root = solve(frozenset(pre))
@@ -237,4 +261,7 @@ def compile_cnf(
     circuit = builder.finish(root)
     if smooth:
         circuit = circuit.smooth()
+    if session is not None:
+        session.check(len(circuit), len(memo))
+        session.finish(len(circuit), len(memo))
     return circuit
