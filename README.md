@@ -153,6 +153,13 @@ The existing `plan()` and `estimate()` tuple APIs remain compact;
 trajectory and a breakdown of initial-state, per-transition, hard-evidence,
 and other model costs.
 
+For one-step decisions under uncertainty, `plan_belief()` accepts the
+correlated joint distribution returned by `ModeTracker.belief()` and ranks
+actions by exact expected goal probability or expected utility. Applications
+may supply stochastic action outcomes and separate operational costs.
+Multi-step belief planning is deliberately not represented as an open-loop
+plan: it requires a future conditional-policy API.
+
 ## GPU / batched evaluation (PyTorch)
 
 ```python

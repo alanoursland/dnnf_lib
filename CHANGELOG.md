@@ -43,6 +43,14 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   and a configurable `max_exact_states` guard. Trackers expose
   `joint_state_count`, `is_exact`, and `last_step_info`, including expansion
   truncation, beam truncation, and retained probability mass when measurable.
+- **GAP-008 — belief-aware planning:** added one-step
+  `CompiledPlanner.plan_belief()`. It optimizes exact expected goal
+  probability or expected utility over a correlated joint belief such as
+  `ModeTracker.belief()`, supports explicit stochastic outcome models,
+  separates action costs from physical outcome probabilities, validates and
+  normalizes belief/outcome masses, and returns every action evaluation.
+  Multi-step calls fail explicitly because that capability requires a
+  conditional policy rather than an open-loop command sequence.
 
 ### Documentation and examples
 
@@ -51,12 +59,14 @@ Notable user-facing changes are recorded here for inclusion in release notes.
 - Updated the recovery-planner example to display its cost decomposition.
 - Updated the service-reliability example to request exact tracking without
   manually calculating beam capacity.
+- Updated the microgrid belief-control experiment to use `plan_belief`
+  instead of its application-local expected-utility loop.
 - Updated the black-box edge-case experiment and archived GAP-001 through
-  GAP-006 under `modenexus_apps/gaps/fixed`.
+  GAP-008 under `modenexus_apps/gaps/fixed`.
 
 ### Verification
 
-- ModeNexus test suite: **295 passed, 7 skipped**.
+- ModeNexus test suite: **303 passed, 7 skipped**.
 - Black-box API edge-case checks: all fixed cases report `OK`.
 - Companion applications: all eight non-PyTorch tests passed. The optional
   PyTorch verification was not run because PyTorch was unavailable in the

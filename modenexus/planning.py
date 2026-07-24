@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import fd
 from .compile_control import CompileControl
@@ -85,6 +85,32 @@ class EstimateResult:
     trajectory: List[Dict[str, object]]
     commands: List[Dict[str, object]]
     costs: PlannerCostBreakdown
+
+
+@dataclass(frozen=True)
+class BeliefActionEvaluation:
+    """Expected one-step value of one command under a joint belief."""
+
+    action: Dict[str, object]
+    expected_goal_probability: float
+    action_cost: float
+    expected_utility: float
+
+
+@dataclass(frozen=True)
+class BeliefPlanResult:
+    """Best one-step action and all evaluated alternatives."""
+
+    action: Dict[str, object]
+    expected_goal_probability: float
+    action_cost: float
+    expected_utility: float
+    evaluations: Tuple[BeliefActionEvaluation, ...]
+
+    @property
+    def commands(self) -> List[Dict[str, object]]:
+        """Single-command list for symmetry with :class:`PlanResult`."""
+        return [dict(self.action)]
 
 
 class Planner:
@@ -375,6 +401,261 @@ class CompiledPlanner:
             commands=self._commands(assignment, self.horizon),
             trajectory=self._trajectory(assignment, self.horizon + 1),
             costs=self._cost_breakdown(cost, assignment),
+        )
+
+    def plan_belief(
+        self,
+        belief: Sequence[Tuple[Mapping[str, object], float]],
+        target: Mapping[str, object],
+        *,
+        action_costs: Optional[
+            Mapping[object, float] | Callable[[Dict[str, object]], float]
+        ] = None,
+        outcome_model: Optional[
+            Callable[
+                [Dict[str, object], Dict[str, object]],
+                Sequence[Tuple[Mapping[str, object], float]],
+            ]
+        ] = None,
+        actions: Optional[Sequence[object]] = None,
+        goal_reward: float = 1.0,
+        cost_weight: float = 1.0,
+    ) -> BeliefPlanResult:
+        """Choose one action by exact expectation over a correlated belief.
+
+        This bounded belief-planning surface intentionally supports only a
+        planner compiled with ``horizon=1`` and one command variable.
+        Multi-step planning under uncertainty requires a conditional policy,
+        not the open-loop command sequence returned by :meth:`plan`.
+
+        ``belief`` has the shape returned by
+        :meth:`modenexus.ModeTracker.belief`: ``[(joint_state, mass), ...]``.
+        Masses are validated and normalized; correlations between modes are
+        preserved.  State keys not used by this planner are ignored, and
+        omitted planner modes remain latent.
+
+        By default, transition-selector weights in the compiled planner
+        define ``P(target at step 1 | state, action)``.  ``outcome_model`` can
+        instead supply explicit stochastic outcomes as
+        ``[(next_state_updates, probability), ...]`` for each state/action.
+        Updates may be partial; unspecified modes persist from the belief
+        state.  This separates physical success probabilities from action
+        costs when planner transition costs represent operational effort.
+
+        Utility is ``goal_reward * P(target) - cost_weight * action_cost``.
+        For a single command variable, ``action_costs`` is either a mapping
+        from command values to costs or a callable receiving the command
+        dictionary.  Evaluations are returned best-first.
+        """
+        if self.horizon != 1:
+            raise NotImplementedError(
+                "plan_belief currently supports horizon=1; multi-step "
+                "belief planning requires a conditional policy"
+            )
+        if len(self.command_names) != 1:
+            raise NotImplementedError(
+                "plan_belief currently supports exactly one command variable"
+            )
+        if not math.isfinite(goal_reward) or goal_reward < 0.0:
+            raise ValueError("goal_reward must be finite and non-negative")
+        if not math.isfinite(cost_weight) or cost_weight < 0.0:
+            raise ValueError("cost_weight must be finite and non-negative")
+        if not target:
+            raise ValueError("target must not be empty")
+        valid_targets = set(self.mode_names) | set(self.obs_names)
+        unknown_targets = set(target) - valid_targets
+        if unknown_targets:
+            raise KeyError(
+                f"unknown planner target variables: {sorted(unknown_targets)}"
+            )
+
+        weighted_states = list(belief)
+        if not weighted_states:
+            raise ValueError("belief must not be empty")
+        total_mass = 0.0
+        checked_states: List[Tuple[Dict[str, object], float]] = []
+        for index, (state, mass) in enumerate(weighted_states):
+            if not isinstance(state, Mapping):
+                raise ValueError(f"belief state {index} is not a mapping")
+            try:
+                numeric_mass = float(mass)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"belief mass at index {index} must be finite and "
+                    f"non-negative; got {mass!r}"
+                ) from None
+            if not math.isfinite(numeric_mass) or numeric_mass < 0.0:
+                raise ValueError(
+                    f"belief mass at index {index} must be finite and "
+                    f"non-negative; got {mass!r}"
+                )
+            state_dict = dict(state)
+            if self.mode_names and not any(
+                name in state_dict for name in self.mode_names
+            ):
+                raise ValueError(
+                    f"belief state {index} contains no modes used by planner"
+                )
+            checked_states.append((state_dict, numeric_mass))
+            total_mass += numeric_mass
+        if not math.isfinite(total_mass) or total_mass <= 0.0:
+            raise ValueError("belief must have positive finite total mass")
+        checked_states = [
+            (state, mass / total_mass) for state, mass in checked_states
+        ]
+
+        command_name = self.command_names[0]
+        command_var = self.system.vars[f"{command_name}@0"]
+        action_values = list(command_var.values if actions is None else actions)
+        if not action_values:
+            raise ValueError("actions must not be empty")
+        for action in action_values:
+            command_var._index(action)
+
+        target_evidence = {
+            f"{name}@1": value for name, value in target.items()
+        }
+
+        def step_evidence(
+            state: Mapping[str, object],
+            step: int,
+            *,
+            include_observables: bool = False,
+        ) -> Dict[str, object]:
+            names = set(self.mode_names)
+            if include_observables:
+                names.update(self.obs_names)
+            return {
+                f"{name}@{step}": value
+                for name, value in state.items()
+                if name in names
+            }
+
+        def conditional_goal_probability(
+            evidence: Dict[str, object]
+        ) -> float:
+            log_denominator = self.system.log_evidence(evidence)
+            if log_denominator == -math.inf:
+                raise ValueError(
+                    f"belief/action outcome is inconsistent with planner: "
+                    f"{evidence}"
+                )
+            with_goal = dict(evidence)
+            with_goal.update(target_evidence)
+            log_numerator = self.system.log_evidence(with_goal)
+            if log_numerator == -math.inf:
+                return 0.0
+            return min(1.0, math.exp(log_numerator - log_denominator))
+
+        def action_cost(action: object, command: Dict[str, object]) -> float:
+            if action_costs is None:
+                value = 0.0
+            elif callable(action_costs):
+                value = action_costs(command)
+            else:
+                if action not in action_costs:
+                    raise KeyError(f"missing action cost for {action!r}")
+                value = action_costs[action]
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"action cost for {action!r} must be finite and "
+                    f"non-negative; got {value!r}"
+                ) from None
+            if not math.isfinite(numeric) or numeric < 0.0:
+                raise ValueError(
+                    f"action cost for {action!r} must be finite and "
+                    f"non-negative; got {value!r}"
+                )
+            return numeric
+
+        evaluations: List[BeliefActionEvaluation] = []
+        for action in action_values:
+            command = {command_name: action}
+            expected_goal = 0.0
+            for state, state_mass in checked_states:
+                base = step_evidence(state, 0)
+                base[f"{command_name}@0"] = action
+                if outcome_model is None:
+                    state_goal = conditional_goal_probability(base)
+                else:
+                    outcomes = list(outcome_model(dict(state), dict(command)))
+                    if not outcomes:
+                        raise ValueError(
+                            f"outcome_model returned no outcomes for "
+                            f"state={state}, action={command}"
+                        )
+                    checked_outcomes = []
+                    outcome_total = 0.0
+                    for outcome, probability in outcomes:
+                        try:
+                            numeric_probability = float(probability)
+                        except (TypeError, ValueError):
+                            raise ValueError(
+                                "outcome probabilities must be finite and "
+                                f"non-negative; got {probability!r}"
+                            ) from None
+                        if (
+                            not math.isfinite(numeric_probability)
+                            or numeric_probability < 0.0
+                        ):
+                            raise ValueError(
+                                "outcome probabilities must be finite and "
+                                f"non-negative; got {probability!r}"
+                            )
+                        checked_outcomes.append(
+                            (dict(outcome), numeric_probability)
+                        )
+                        outcome_total += numeric_probability
+                    if not math.isfinite(outcome_total) or outcome_total <= 0:
+                        raise ValueError(
+                            "outcome probabilities must have positive "
+                            "finite total mass"
+                        )
+                    state_goal = 0.0
+                    for updates, probability in checked_outcomes:
+                        next_state = {
+                            name: value for name, value in state.items()
+                            if name in self.mode_names
+                        }
+                        next_state.update(
+                            {
+                                name: value for name, value in updates.items()
+                                if name in valid_targets
+                            }
+                        )
+                        outcome_evidence = dict(base)
+                        outcome_evidence.update(
+                            step_evidence(
+                                next_state, 1, include_observables=True
+                            )
+                        )
+                        state_goal += (
+                            probability
+                            / outcome_total
+                            * conditional_goal_probability(outcome_evidence)
+                        )
+                expected_goal += state_mass * state_goal
+            cost = action_cost(action, command)
+            utility = goal_reward * expected_goal - cost_weight * cost
+            evaluations.append(
+                BeliefActionEvaluation(
+                    action=command,
+                    expected_goal_probability=expected_goal,
+                    action_cost=cost,
+                    expected_utility=utility,
+                )
+            )
+
+        evaluations.sort(key=lambda item: -item.expected_utility)
+        best = evaluations[0]
+        return BeliefPlanResult(
+            action=dict(best.action),
+            expected_goal_probability=best.expected_goal_probability,
+            action_cost=best.action_cost,
+            expected_utility=best.expected_utility,
+            evaluations=tuple(evaluations),
         )
 
     def estimate(

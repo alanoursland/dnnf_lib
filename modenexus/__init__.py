@@ -49,6 +49,8 @@ from .eval import (
 from .formula import And, Formula, Not, Or, Prop, at_most_one, exactly_one, iff, xor
 from .kbest import enumerate_map, enumerate_models
 from .planning import (
+    BeliefActionEvaluation,
+    BeliefPlanResult,
     EstimateResult,
     PlanResult,
     Planner,
@@ -90,6 +92,8 @@ __all__ = [
     "ModeTracker",
     "TrackingStepInfo",
     "Planner",
+    "BeliefActionEvaluation",
+    "BeliefPlanResult",
     "PlanResult",
     "EstimateResult",
     "PlannerCostBreakdown",
