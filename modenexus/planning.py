@@ -129,9 +129,10 @@ class BeliefSequenceEvaluation:
 class BeliefPolicyResult:
     """Best bounded-lookahead sequence under a joint initial belief.
 
-    ``observation_branching`` is false for this initial multi-step surface:
-    stochastic outcomes are integrated exactly, but future commands do not
-    branch on observations.
+    ``observation_branching`` is false for this open-loop result: stochastic
+    outcomes are integrated exactly, but future commands do not branch on
+    observations. Supply an observation model to receive a
+    :class:`ConditionalBeliefPolicyResult`.
     """
 
     commands: Tuple[Dict[str, object], ...]
@@ -146,6 +147,60 @@ class BeliefPolicyResult:
     def action(self) -> Dict[str, object]:
         """First action, suitable for receding-horizon execution."""
         return dict(self.commands[0])
+
+
+@dataclass(frozen=True)
+class BeliefPolicyBranch:
+    """One observation edge in a conditional belief-policy tree."""
+
+    observation: Dict[str, object]
+    probability: float
+    expected_goal_probability: float
+    expected_action_cost: float
+    expected_utility: float
+    policy: Optional["BeliefPolicyNode"]
+
+
+@dataclass(frozen=True)
+class BeliefPolicyNode:
+    """One action and its observation-contingent continuations."""
+
+    action: Dict[str, object]
+    immediate_action_cost: float
+    expected_goal_probability: float
+    expected_action_cost: float
+    expected_utility: float
+    branches: Tuple[BeliefPolicyBranch, ...]
+
+
+@dataclass(frozen=True)
+class ConditionalBeliefPolicyResult:
+    """Best bounded policy tree and all alternative root actions."""
+
+    policy: BeliefPolicyNode
+    evaluations: Tuple[BeliefPolicyNode, ...]
+    policy_node_count: int
+    outcome_branch_count: int
+    observation_branch_count: int
+    observation_branching: bool = True
+
+    @property
+    def action(self) -> Dict[str, object]:
+        """Root action selected after valuing conditional continuations."""
+        return dict(self.policy.action)
+
+    @property
+    def expected_goal_probability(self) -> float:
+        return self.policy.expected_goal_probability
+
+    @property
+    def action_cost(self) -> float:
+        """Expected total action cost under the selected policy."""
+        return self.policy.expected_action_cost
+
+    @property
+    def expected_utility(self) -> float:
+        return self.policy.expected_utility
 
 
 class Planner:
@@ -452,20 +507,33 @@ class CompiledPlanner:
                 Sequence[Tuple[Mapping[str, object], float]],
             ]
         ] = None,
+        observation_model: Optional[
+            Callable[
+                [Dict[str, object], Dict[str, object]],
+                Mapping[str, object]
+                | Sequence[Tuple[Mapping[str, object], float]],
+            ]
+        ] = None,
         actions: Optional[Sequence[object]] = None,
         goal_reward: float = 1.0,
         cost_weight: float = 1.0,
         max_action_sequences: int = 100_000,
         max_outcome_branches: int = 100_000,
-    ) -> BeliefPlanResult | BeliefPolicyResult:
+        max_policy_nodes: int = 100_000,
+        max_observation_branches: int = 100_000,
+    ) -> (
+        BeliefPlanResult
+        | BeliefPolicyResult
+        | ConditionalBeliefPolicyResult
+    ):
         """Choose one action by exact expectation over a correlated belief.
 
         With ``horizon=1`` this returns :class:`BeliefPlanResult`.  Longer
-        horizons perform bounded open-loop lookahead and return
-        :class:`BeliefPolicyResult`: stochastic outcomes are integrated
-        exactly, but the selected future commands do not branch on future
-        observations.  Execute its first ``action`` and replan after the next
-        observation for receding-horizon control.
+        horizons perform bounded lookahead.  Without ``observation_model``
+        they return an open-loop :class:`BeliefPolicyResult`.  With an
+        observation callback they return
+        :class:`ConditionalBeliefPolicyResult`, whose future actions branch
+        on the observations produced after each stochastic outcome.
 
         ``belief`` has the shape returned by
         :meth:`modenexus.ModeTracker.belief`: ``[(joint_state, mass), ...]``.
@@ -480,13 +548,21 @@ class CompiledPlanner:
         Updates may be partial; unspecified modes persist from the belief
         state.  This separates physical success probabilities from action
         costs when planner transition costs represent operational effort.
+        Conditional lookahead requires this explicit outcome model.
+
+        ``observation_model(next_state, command)`` returns either one
+        observation mapping or a probability-weighted sequence of observation
+        mappings.  States producing the same observation are combined into a
+        posterior belief before the next action is optimized.  Returning the
+        state itself implements perfect observation; returning an empty
+        mapping implements no information.
 
         Utility is ``goal_reward * P(target) - cost_weight * action_cost``.
         For a single command variable, ``action_costs`` is either a mapping
         from command values to costs or a callable receiving the command
         dictionary.  Evaluations are returned best-first.  The explicit
-        sequence and outcome-branch limits make exponential lookahead
-        inspectable and provisionable.
+        sequence, outcome-branch, policy-node, and observation-branch limits
+        make exponential lookahead inspectable and provisionable.
         """
         if len(self.command_names) != 1:
             raise NotImplementedError(
@@ -500,6 +576,19 @@ class CompiledPlanner:
             raise ValueError("max_action_sequences must be at least 1")
         if max_outcome_branches < 1:
             raise ValueError("max_outcome_branches must be at least 1")
+        if max_policy_nodes < 1:
+            raise ValueError("max_policy_nodes must be at least 1")
+        if max_observation_branches < 1:
+            raise ValueError("max_observation_branches must be at least 1")
+        if observation_model is not None and self.horizon < 2:
+            raise ValueError(
+                "observation branching requires a planner horizon of at "
+                "least 2"
+            )
+        if observation_model is not None and outcome_model is None:
+            raise ValueError(
+                "observation branching requires an explicit outcome_model"
+            )
         if not target:
             raise ValueError("target must not be empty")
         valid_targets = set(self.mode_names) | set(self.obs_names)
@@ -655,6 +744,300 @@ class CompiledPlanner:
                 for outcome, probability in checked
                 if probability > 0.0
             ]
+
+        def normalized_observations(
+            state: Dict[str, object], command: Dict[str, object]
+        ) -> List[Tuple[Dict[str, object], float]]:
+            if observation_model is None:
+                raise RuntimeError(
+                    "normalized_observations needs observation_model"
+                )
+            supplied = observation_model(dict(state), dict(command))
+            if isinstance(supplied, Mapping):
+                observations = [(supplied, 1.0)]
+            else:
+                observations = list(supplied)
+            if not observations:
+                raise ValueError(
+                    "observation_model returned no observations for "
+                    f"state={state}, action={command}"
+                )
+            checked = []
+            total = 0.0
+            for index, item in enumerate(observations):
+                try:
+                    observation, probability = item
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        "observation_model entries must be "
+                        "(observation, probability) pairs; "
+                        f"entry {index} is {item!r}"
+                    ) from None
+                if not isinstance(observation, Mapping):
+                    raise ValueError(
+                        f"observation {index} is not a mapping"
+                    )
+                try:
+                    numeric_probability = float(probability)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        "observation probabilities must be finite and "
+                        f"non-negative; got {probability!r}"
+                    ) from None
+                if (
+                    not math.isfinite(numeric_probability)
+                    or numeric_probability < 0.0
+                ):
+                    raise ValueError(
+                        "observation probabilities must be finite and "
+                        f"non-negative; got {probability!r}"
+                    )
+                checked.append((dict(observation), numeric_probability))
+                total += numeric_probability
+            if not math.isfinite(total) or total <= 0.0:
+                raise ValueError(
+                    "observation probabilities must have positive finite "
+                    "total mass"
+                )
+            return [
+                (observation, probability / total)
+                for observation, probability in checked
+                if probability > 0.0
+            ]
+
+        def frozen_mapping(
+            value: Mapping[str, object],
+            *,
+            label: str,
+        ) -> Tuple[Tuple[str, object], ...]:
+            try:
+                frozen = tuple(sorted(value.items()))
+                hash(frozen)
+                return frozen
+            except TypeError:
+                raise ValueError(
+                    f"{label} keys and values must be orderable and hashable"
+                ) from None
+
+        if observation_model is not None:
+            counters = {
+                "policy_nodes": 0,
+                "outcome_branches": 0,
+                "observation_branches": 0,
+            }
+
+            def terminal_goal_probability(
+                branch_belief: Sequence[
+                    Tuple[Dict[str, object], float]
+                ],
+                step: int,
+            ) -> float:
+                return sum(
+                    mass
+                    * conditional_goal_probability(
+                        step_evidence(
+                            state,
+                            step,
+                            include_observables=True,
+                        ),
+                        step,
+                    )
+                    for state, mass in branch_belief
+                )
+
+            def solve_conditional_policy(
+                branch_belief: Sequence[
+                    Tuple[Dict[str, object], float]
+                ],
+                step: int,
+            ) -> Tuple[BeliefPolicyNode, Tuple[BeliefPolicyNode, ...]]:
+                candidates: List[BeliefPolicyNode] = []
+                for action in action_values:
+                    counters["policy_nodes"] += 1
+                    if counters["policy_nodes"] > max_policy_nodes:
+                        raise ValueError(
+                            "conditional belief lookahead exceeded "
+                            f"max_policy_nodes={max_policy_nodes}"
+                        )
+                    command = {command_name: action}
+                    grouped: Dict[
+                        Tuple[Tuple[str, object], ...],
+                        Dict[str, object],
+                    ] = {}
+                    for state, state_mass in branch_belief:
+                        base = step_evidence(state, step)
+                        base[f"{command_name}@{step}"] = action
+                        for updates, outcome_probability in (
+                            normalized_outcomes(state, command)
+                        ):
+                            counters["outcome_branches"] += 1
+                            if (
+                                counters["outcome_branches"]
+                                > max_outcome_branches
+                            ):
+                                raise ValueError(
+                                    "conditional belief lookahead exceeded "
+                                    f"max_outcome_branches="
+                                    f"{max_outcome_branches}"
+                                )
+                            next_state = dict(state)
+                            next_state.update(updates)
+                            transition_evidence = dict(base)
+                            transition_evidence.update(
+                                step_evidence(next_state, step + 1)
+                            )
+                            transition_evidence.update(
+                                {
+                                    f"{name}@{step + 1}": value
+                                    for name, value in updates.items()
+                                    if name in self.obs_names
+                                }
+                            )
+                            if (
+                                self.system.log_evidence(
+                                    transition_evidence
+                                )
+                                == -math.inf
+                            ):
+                                raise ValueError(
+                                    "outcome_model produced a state "
+                                    "inconsistent with planner: "
+                                    f"{transition_evidence}"
+                                )
+                            for (
+                                observation,
+                                observation_probability,
+                            ) in normalized_observations(
+                                next_state, command
+                            ):
+                                observation_key = frozen_mapping(
+                                    observation,
+                                    label="observation",
+                                )
+                                state_key = frozen_mapping(
+                                    next_state,
+                                    label="state",
+                                )
+                                group = grouped.setdefault(
+                                    observation_key,
+                                    {
+                                        "observation": observation,
+                                        "states": {},
+                                        "mass": 0.0,
+                                    },
+                                )
+                                branch_mass = (
+                                    state_mass
+                                    * outcome_probability
+                                    * observation_probability
+                                )
+                                states = group["states"]
+                                if state_key in states:
+                                    states[state_key][1] += branch_mass
+                                else:
+                                    states[state_key] = [
+                                        next_state,
+                                        branch_mass,
+                                    ]
+                                group["mass"] += branch_mass
+
+                    branches: List[BeliefPolicyBranch] = []
+                    expected_goal = 0.0
+                    expected_continuation_cost = 0.0
+                    for group in grouped.values():
+                        probability = float(group["mass"])
+                        if probability <= 0.0:
+                            continue
+                        counters["observation_branches"] += 1
+                        if (
+                            counters["observation_branches"]
+                            > max_observation_branches
+                        ):
+                            raise ValueError(
+                                "conditional belief lookahead exceeded "
+                                f"max_observation_branches="
+                                f"{max_observation_branches}"
+                            )
+                        posterior = [
+                            (state, mass / probability)
+                            for state, mass in group["states"].values()
+                        ]
+                        if step + 1 < self.horizon:
+                            child, _ = solve_conditional_policy(
+                                posterior, step + 1
+                            )
+                            branch_goal = (
+                                child.expected_goal_probability
+                            )
+                            branch_cost = child.expected_action_cost
+                            branch_utility = child.expected_utility
+                            child_policy: Optional[BeliefPolicyNode] = child
+                        else:
+                            branch_goal = terminal_goal_probability(
+                                posterior, step + 1
+                            )
+                            branch_cost = 0.0
+                            branch_utility = goal_reward * branch_goal
+                            child_policy = None
+                        expected_goal += probability * branch_goal
+                        expected_continuation_cost += (
+                            probability * branch_cost
+                        )
+                        branches.append(
+                            BeliefPolicyBranch(
+                                observation=dict(group["observation"]),
+                                probability=probability,
+                                expected_goal_probability=branch_goal,
+                                expected_action_cost=branch_cost,
+                                expected_utility=branch_utility,
+                                policy=child_policy,
+                            )
+                        )
+
+                    immediate_cost = action_cost(action, command)
+                    expected_cost = (
+                        immediate_cost + expected_continuation_cost
+                    )
+                    candidates.append(
+                        BeliefPolicyNode(
+                            action=command,
+                            immediate_action_cost=immediate_cost,
+                            expected_goal_probability=expected_goal,
+                            expected_action_cost=expected_cost,
+                            expected_utility=(
+                                goal_reward * expected_goal
+                                - cost_weight * expected_cost
+                            ),
+                            branches=tuple(
+                                sorted(
+                                    branches,
+                                    key=lambda branch: -branch.probability,
+                                )
+                            ),
+                        )
+                    )
+
+                candidates.sort(
+                    key=lambda item: (
+                        -item.expected_utility,
+                        -item.expected_goal_probability,
+                        item.expected_action_cost,
+                    )
+                )
+                return candidates[0], tuple(candidates)
+
+            best_policy, root_evaluations = solve_conditional_policy(
+                checked_states, 0
+            )
+            return ConditionalBeliefPolicyResult(
+                policy=best_policy,
+                evaluations=root_evaluations,
+                policy_node_count=counters["policy_nodes"],
+                outcome_branch_count=counters["outcome_branches"],
+                observation_branch_count=counters[
+                    "observation_branches"
+                ],
+            )
 
         if self.horizon > 1:
             sequence_count = len(action_values) ** self.horizon

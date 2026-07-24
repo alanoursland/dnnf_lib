@@ -167,6 +167,92 @@ def test_plan_belief_multistep_has_explicit_sequence_budget():
         )
 
 
+def test_plan_belief_selects_observation_contingent_first_action():
+    planner = Planner()
+    planner.mode(
+        "mode",
+        ("a", "a_ready", "b", "goal"),
+        priors=(1, 1, 1, 1),
+    )
+    planner.command("action", ("none", "prepare", "fix_a", "fix_b"))
+    planner.observable("done")
+    planner.behavior(
+        lambda value: iff(value["done"] == True, value["mode"] == "goal")
+    )
+    planner.transition(
+        "mode", "a", "a_ready", command=("action", "prepare")
+    )
+    planner.transition(
+        "mode", "a_ready", "goal", command=("action", "fix_a")
+    )
+    planner.transition(
+        "mode", "b", "goal", command=("action", "fix_b")
+    )
+
+    def outcomes(state, command):
+        action = command["action"]
+        if state["mode"] == "a" and action == "prepare":
+            return [({"mode": "a_ready"}, 1.0)]
+        if state["mode"] == "a_ready" and action == "fix_a":
+            return [({"mode": "goal"}, 1.0)]
+        if state["mode"] == "b" and action == "fix_b":
+            return [({"mode": "goal"}, 1.0)]
+        return [({}, 1.0)]
+
+    result = planner.compile(horizon=2).plan_belief(
+        belief=[({"mode": "a"}, 0.5), ({"mode": "b"}, 0.5)],
+        target={"done": True},
+        outcome_model=outcomes,
+        observation_model=lambda state, command: {
+            "mode": state["mode"]
+        },
+        action_costs={
+            "none": 0.0,
+            "prepare": 0.1,
+            "fix_a": 0.1,
+            "fix_b": 0.1,
+        },
+        cost_weight=0.1,
+    )
+
+    assert result.observation_branching
+    assert result.action == {"action": "prepare"}
+    assert result.expected_goal_probability == pytest.approx(1.0)
+    assert result.action_cost == pytest.approx(0.2)
+    assert result.expected_utility == pytest.approx(0.98)
+    assert result.policy_node_count > 0
+    assert result.outcome_branch_count > 0
+    assert result.observation_branch_count > 0
+    continuations = {
+        branch.observation["mode"]: (
+            None if branch.policy is None
+            else branch.policy.action["action"]
+        )
+        for branch in result.policy.branches
+    }
+    assert continuations == {"a_ready": "fix_a", "b": "fix_b"}
+
+
+def test_plan_belief_conditional_policy_has_explicit_node_budget():
+    with pytest.raises(ValueError, match="max_policy_nodes"):
+        repair_planner(horizon=2).plan_belief(
+            belief=[({"mode": "a"}, 1.0)],
+            target={"done": True},
+            outcome_model=repair_outcomes,
+            observation_model=lambda state, command: dict(state),
+            max_policy_nodes=2,
+        )
+
+
+def test_plan_belief_conditional_policy_requires_outcome_model():
+    with pytest.raises(ValueError, match="explicit outcome_model"):
+        repair_planner(horizon=2).plan_belief(
+            belief=[({"mode": "a"}, 1.0)],
+            target={"done": True},
+            observation_model=lambda state, command: dict(state),
+        )
+
+
 @pytest.mark.parametrize(
     "belief",
     [

@@ -160,9 +160,20 @@ may supply stochastic action outcomes and separate operational costs.
 On planners compiled with a longer horizon, it performs bounded lookahead
 over command sequences, propagates stochastic outcome branches, and returns
 the best `BeliefPolicyResult`; sequence and branch budgets make the
-exponential work explicit. This first multi-step surface has
+exponential work explicit. Without an observation model this result has
 `observation_branching=False`: execute its first action and replan after new
-evidence. Observation-contingent policy trees remain a future extension.
+evidence.
+
+Supplying both `outcome_model` and
+`observation_model(next_state, command)` instead returns a
+`ConditionalBeliefPolicyResult`. Each `BeliefPolicyNode` selects an action,
+and its `BeliefPolicyBranch` edges combine states with the same observation
+into a posterior belief before optimizing the next action. Observation
+callbacks may be deterministic mappings or probability-weighted mappings,
+so the same surface represents perfect, partial, or noisy sensing.
+`max_policy_nodes`, `max_outcome_branches`, and
+`max_observation_branches` make conditional-policy expansion explicit; the
+result reports all three realized expansion counts.
 
 ## GPU / batched evaluation (PyTorch)
 

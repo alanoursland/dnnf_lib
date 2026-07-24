@@ -58,6 +58,16 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   sequence, every alternative, per-step goal probabilities, and the explicit
   `observation_branching=False` limitation. Sequence and outcome-branch
   budgets fail early with the required resource count.
+- **GAP-010 — observation-contingent belief policies:** `plan_belief()` now
+  accepts an `observation_model` alongside explicit stochastic outcomes and
+  returns a bounded `ConditionalBeliefPolicyResult`. `BeliefPolicyNode` and
+  `BeliefPolicyBranch` expose the selected action, observation probabilities,
+  posterior-specific continuations, expected terminal goal probability,
+  expected action cost, and utility. Perfect, partial, and stochastic
+  observations use the same callback surface. Explicit policy-node,
+  outcome-branch, and observation-branch budgets bound the potentially
+  exponential policy tree, and successful results report the corresponding
+  expansion counts.
 
 ### Documentation and examples
 
@@ -70,13 +80,15 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   instead of its application-local expected-utility loop.
 - Updated the microgrid receding-horizon controller and policy trial to use
   two-step belief lookahead for prerequisite recovery actions.
+- Updated the conditional microgrid experiment to validate the public policy
+  tree against its independent exhaustive evaluator.
 - Updated the black-box edge-case experiment and archived GAP-001 through
-  GAP-009 under `modenexus_apps/gaps/fixed`.
+  GAP-010 under `modenexus_apps/gaps/fixed`.
 
 ### Verification
 
-- ModeNexus test suite: **304 passed, 7 skipped**.
+- ModeNexus test suite: **307 passed, 7 skipped**.
 - Black-box API edge-case checks: all fixed cases report `OK`.
-- Companion applications: all eight non-PyTorch tests passed. The optional
+- Companion applications: all **33 non-PyTorch tests passed**. The optional
   PyTorch verification was not run because PyTorch was unavailable in the
   verification environment.
