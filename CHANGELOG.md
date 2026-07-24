@@ -143,6 +143,24 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   fallback is exposed as `BeliefPolicyNode.fallback_branch` with its
   aggregate posterior and the `contributing_observations` merged into it;
   `route()` returns that branch for fallback routing.
+- **GAP-019 — chance-constrained belief planning:** `plan_belief()` accepts
+  `min_goal_probability`, a whole-policy reliability floor: feasibility is
+  decided first and utility ranks only the feasible candidates. Conditional
+  planning enforces the constraint by Pareto-frontier dynamic programming
+  over (goal probability, expected cost) pairs — a chance constraint cannot
+  be enforced per node, since the reliability one observation branch must
+  deliver depends on what the others deliver.
+  `min_branch_goal_probability` adds the stricter per-branch safety
+  variant. Infeasibility is reported, not raised: the most reliable policy
+  returns with `feasible=False` and `best_achievable_goal_probability`.
+  `max_frontier_points` bounds each frontier with endpoints preserved, so
+  feasibility and best-achievable stay exact under truncation and only
+  cost-optimality can degrade (`constraint_optimality`). Action
+  certificates gain goal-probability lower/upper bounds, and
+  `constraint_certification` composes observation pruning and
+  tracker-retained mass into certified-feasible, certified-infeasible, or
+  indeterminate, scoped like the utility certificates. The same floor works
+  on the one-step and open-loop paths.
 
 ### Documentation and examples
 
@@ -172,16 +190,18 @@ Notable user-facing changes are recorded here for inclusion in release notes.
 - Updated the belief-metadata, validation-edge, operational-control,
   observation-routing, and branch-explainability experiments and their lab
   reports to validate the fixed behavior.
+- Updated the microgrid risk-constraint experiment to exercise the public
+  `min_goal_probability` chance constraint, including infeasibility
+  reporting for an unreachable floor.
 - Updated the black-box edge-case experiment and archived GAP-001 through
-  GAP-018 and GAP-020 under `modenexus_apps/gaps/fixed`; GAP-019
-  (belief-planning reliability constraints) remains open pending design.
+  GAP-020 under `modenexus_apps/gaps/fixed`.
 
 ### Verification
 
-- ModeNexus test suite: **369 passed, 1 skipped** (PyTorch available in the
+- ModeNexus test suite: **381 passed, 1 skipped** (PyTorch available in the
   verification environment; the single skip needs an external c2d binary).
 - Black-box API edge-case checks: all fixed cases report `OK`.
-- Companion applications: all **49 tests passed**, including the updated
+- Companion applications: all **53 tests passed**, including the updated
   belief-metadata, validation-edge, operational-control,
-  observation-routing, and branch-explainability reproducers asserting the
-  fixed behavior.
+  observation-routing, risk-constraint, and branch-explainability
+  reproducers asserting the fixed behavior.

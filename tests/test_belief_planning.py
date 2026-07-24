@@ -409,6 +409,289 @@ def test_plan_belief_validates_joint_belief(belief):
         )
 
 
+def reliability_planner(horizon=1):
+    planner = Planner()
+    planner.mode("mode", ("bad", "goal"), priors=(0.9, 0.1))
+    planner.command("action", ("none", "cheap", "sure"))
+    planner.observable("done")
+    planner.behavior(
+        lambda value: iff(value["done"] == True, value["mode"] == "goal")
+    )
+    planner.transition("mode", "bad", "goal", command=("action", "cheap"))
+    planner.transition("mode", "bad", "goal", command=("action", "sure"))
+    return planner.compile(horizon)
+
+
+def reliability_outcomes(state, command):
+    action = command["action"]
+    if state["mode"] == "bad" and action == "cheap":
+        return [({"mode": "goal"}, 0.85), ({}, 0.15)]
+    if state["mode"] == "bad" and action == "sure":
+        return [({"mode": "goal"}, 0.95), ({}, 0.05)]
+    return [({}, 1.0)]
+
+
+RELIABILITY_COSTS = {"none": 0.0, "cheap": 0.0, "sure": 0.5}
+
+
+def test_one_step_reliability_floor_overrides_utility():
+    planner = reliability_planner()
+    arguments = dict(
+        belief=[({"mode": "bad"}, 1.0)],
+        target={"done": True},
+        outcome_model=reliability_outcomes,
+        action_costs=RELIABILITY_COSTS,
+        cost_weight=0.5,
+    )
+    unconstrained = planner.plan_belief(**arguments)
+    assert unconstrained.action == {"action": "cheap"}
+    assert unconstrained.feasible is None
+
+    floored = planner.plan_belief(min_goal_probability=0.9, **arguments)
+    assert floored.action == {"action": "sure"}
+    assert floored.feasible
+    assert floored.goal_probability_constraint == 0.9
+    assert floored.expected_goal_probability == pytest.approx(0.95)
+
+    impossible = planner.plan_belief(
+        min_goal_probability=0.99, **arguments
+    )
+    assert not impossible.feasible
+    assert impossible.action == {"action": "sure"}
+    assert impossible.best_achievable_goal_probability == pytest.approx(
+        0.95
+    )
+
+
+def test_open_loop_reliability_floor():
+    planner = reliability_planner(horizon=2)
+    arguments = dict(
+        belief=[({"mode": "bad"}, 1.0)],
+        target={"done": True},
+        outcome_model=reliability_outcomes,
+        action_costs=RELIABILITY_COSTS,
+        cost_weight=0.5,
+    )
+    floored = planner.plan_belief(min_goal_probability=0.99, **arguments)
+    assert floored.feasible
+    assert floored.expected_goal_probability >= 0.99 - 1e-9
+
+    impossible = planner.plan_belief(
+        min_goal_probability=0.999, **arguments
+    )
+    assert not impossible.feasible
+    assert impossible.best_achievable_goal_probability == pytest.approx(
+        0.95 + 0.05 * 0.95
+    )
+
+
+def staged_repair_planner():
+    """Fixes succeed only while ``fresh``; retries are worthless."""
+    planner = Planner()
+    planner.mode("mode", ("a", "b", "goal"), priors=(0.45, 0.45, 0.1))
+    planner.mode("fresh", ("yes", "no"))
+    planner.command(
+        "action", ("none", "fix_cheap", "fix_sure", "fix_b")
+    )
+    planner.observable("done")
+    planner.behavior(
+        lambda value: iff(value["done"] == True, value["mode"] == "goal")
+    )
+    for fix in ("fix_cheap", "fix_sure", "fix_b"):
+        planner.transition("fresh", "yes", "no", command=("action", fix))
+    planner.transition(
+        "mode", "a", "goal", command=("action", "fix_cheap")
+    )
+    planner.transition(
+        "mode", "a", "goal", command=("action", "fix_sure")
+    )
+    planner.transition("mode", "b", "goal", command=("action", "fix_b"))
+    return planner.compile(2)
+
+
+def staged_outcomes(state, command):
+    action = command["action"]
+    if action == "none":
+        return [({}, 1.0)]
+    if state["fresh"] == "yes":
+        if state["mode"] == "a" and action == "fix_cheap":
+            return [
+                ({"mode": "goal", "fresh": "no"}, 0.9),
+                ({"fresh": "no"}, 0.1),
+            ]
+        if state["mode"] == "a" and action == "fix_sure":
+            return [({"mode": "goal", "fresh": "no"}, 1.0)]
+        if state["mode"] == "b" and action == "fix_b":
+            return [
+                ({"mode": "goal", "fresh": "no"}, 0.8),
+                ({"fresh": "no"}, 0.2),
+            ]
+    return [({"fresh": "no"}, 1.0)]
+
+
+STAGED_BELIEF = [
+    ({"mode": "a", "fresh": "yes"}, 0.5),
+    ({"mode": "b", "fresh": "yes"}, 0.5),
+]
+STAGED_COSTS = {
+    "none": 0.0,
+    "fix_cheap": 0.1,
+    "fix_sure": 1.0,
+    "fix_b": 0.1,
+}
+
+
+def staged_arguments(**overrides):
+    arguments = dict(
+        belief=STAGED_BELIEF,
+        target={"done": True},
+        outcome_model=staged_outcomes,
+        observation_model=lambda state, command: {
+            "mode": state["mode"]
+        },
+        action_costs=STAGED_COSTS,
+        cost_weight=0.5,
+    )
+    arguments.update(overrides)
+    return arguments
+
+
+def branch_action(policy, mode):
+    branch = next(
+        branch for branch in policy.branches
+        if branch.observation == {"mode": mode}
+    )
+    return branch.policy.action["action"]
+
+
+def test_reliability_floor_composes_across_observation_branches():
+    planner = staged_repair_planner()
+    unconstrained = planner.plan_belief(**staged_arguments())
+    # Utility alone picks the cheap repair in branch a: 0.85 overall.
+    assert unconstrained.expected_goal_probability == pytest.approx(0.85)
+    assert branch_action(unconstrained.policy, "a") == "fix_cheap"
+
+    # Branch b's ceiling is 0.8, below the floor — a per-node threshold
+    # would wrongly report infeasibility.  The whole-policy constraint is
+    # met by buying reliability in branch a instead.
+    floored = planner.plan_belief(
+        min_goal_probability=0.9, **staged_arguments()
+    )
+    assert floored.feasible
+    assert floored.expected_goal_probability == pytest.approx(0.9)
+    assert branch_action(floored.policy, "a") == "fix_sure"
+    assert branch_action(floored.policy, "b") == "fix_b"
+    assert floored.goal_probability_constraint == 0.9
+    assert floored.constraint_certification == "certified-feasible"
+    assert floored.constraint_optimality == "exact"
+
+    impossible = planner.plan_belief(
+        min_goal_probability=0.95, **staged_arguments()
+    )
+    assert not impossible.feasible
+    assert impossible.best_achievable_goal_probability == pytest.approx(
+        0.9
+    )
+    assert impossible.constraint_certification == "certified-infeasible"
+    # Infeasible results still return the most reliable policy.
+    assert impossible.expected_goal_probability == pytest.approx(0.9)
+
+
+def test_branch_reliability_floor_is_stricter():
+    planner = staged_repair_planner()
+    relaxed = planner.plan_belief(
+        min_branch_goal_probability=0.75, **staged_arguments()
+    )
+    assert relaxed.feasible
+    assert relaxed.branch_goal_probability_constraint == 0.75
+    for branch in relaxed.policy.branches:
+        assert branch.expected_goal_probability >= 0.75 - 1e-9
+
+    # No continuation for branch b can reach 0.9, so the safety variant is
+    # genuinely infeasible even though the root constraint above was not.
+    strict = planner.plan_belief(
+        min_branch_goal_probability=0.9, **staged_arguments()
+    )
+    assert not strict.feasible
+    assert strict.best_achievable_goal_probability == pytest.approx(0.9)
+
+
+def test_frontier_truncation_keeps_feasibility_exact():
+    planner = staged_repair_planner()
+    result = planner.plan_belief(
+        min_goal_probability=0.9,
+        max_frontier_points=2,
+        **staged_arguments(),
+    )
+    assert result.feasible
+    assert result.expected_goal_probability >= 0.9 - 1e-9
+    assert result.constraint_optimality == "frontier-truncated"
+
+
+def test_reliability_certification_composes_tracker_scope():
+    planner = staged_repair_planner()
+    unknown = planner.plan_belief(
+        min_goal_probability=0.5,
+        **staged_arguments(
+            belief=TrackedBelief(
+                STAGED_BELIEF,
+                exact=False,
+                retained_probability_mass=None,
+            )
+        ),
+    )
+    # Feasible against the supplied normalized beam, but with unknown
+    # tracker mass no end-to-end feasibility certificate is possible.
+    assert unknown.feasible
+    assert unknown.constraint_certification == "indeterminate"
+
+    exact = planner.plan_belief(
+        min_goal_probability=0.5,
+        **staged_arguments(
+            belief=TrackedBelief(
+                STAGED_BELIEF,
+                exact=True,
+                retained_probability_mass=1.0,
+            )
+        ),
+    )
+    assert exact.feasible
+    assert exact.constraint_certification == "certified-feasible"
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("min_goal_probability", -0.1),
+        ("min_goal_probability", 1.1),
+        ("min_goal_probability", math.nan),
+        ("min_branch_goal_probability", 1.1),
+    ],
+)
+def test_reliability_constraints_validate_range(name, value):
+    with pytest.raises(ValueError, match=name):
+        staged_repair_planner().plan_belief(
+            **staged_arguments(), **{name: value}
+        )
+
+
+def test_branch_floor_requires_observation_model():
+    with pytest.raises(ValueError, match="observation_model"):
+        reliability_planner().plan_belief(
+            belief=[({"mode": "bad"}, 1.0)],
+            target={"done": True},
+            outcome_model=reliability_outcomes,
+            min_branch_goal_probability=0.5,
+        )
+
+
+def test_max_frontier_points_validates():
+    with pytest.raises(ValueError, match="max_frontier_points"):
+        staged_repair_planner().plan_belief(
+            max_frontier_points=1, **staged_arguments()
+        )
+
+
 @pytest.mark.parametrize(
     "probabilities",
     [

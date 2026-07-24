@@ -222,6 +222,18 @@ on the exact full-observation optimum. Every evaluated root action exposes
 utility lower and upper bounds. The overall result reports the unrestricted
 optimal-utility upper bound and maximum root-action regret; the root action
 is certified when its lower bound dominates every alternative upper bound.
+For hard reliability requirements, `min_goal_probability` turns the floor
+into a first-class chance constraint: feasibility is decided before utility
+ranks the survivors, and in conditional planning the constraint is enforced
+across the whole policy tree by Pareto-frontier lookahead — reliability
+bought in one observation branch can compensate for another branch's
+ceiling, which no per-node threshold can express.
+`min_branch_goal_probability` adds the stricter per-branch safety variant.
+An unreachable floor is reported (`feasible=False` with
+`best_achievable_goal_probability`), never silently degraded, and
+`constraint_certification` composes pruning and tracker mass into
+certified-feasible / certified-infeasible / indeterminate.
+
 When the input is a `TrackedBelief`, the planner composes tracker uncertainty
 into separate end-to-end action bounds. Results preserve the policy-only
 certificate, report certificate scope, and refuse to present a beam-only

@@ -262,6 +262,9 @@ class BeliefPlanResult:
     action_cost: float
     expected_utility: float
     evaluations: Tuple[BeliefActionEvaluation, ...]
+    goal_probability_constraint: Optional[float] = None
+    feasible: Optional[bool] = None
+    best_achievable_goal_probability: Optional[float] = None
 
     @property
     def commands(self) -> List[Dict[str, object]]:
@@ -297,6 +300,9 @@ class BeliefPolicyResult:
     expected_goal_probabilities: Tuple[float, ...]
     evaluations: Tuple[BeliefSequenceEvaluation, ...]
     observation_branching: bool = False
+    goal_probability_constraint: Optional[float] = None
+    feasible: Optional[bool] = None
+    best_achievable_goal_probability: Optional[float] = None
 
     @property
     def action(self) -> Dict[str, object]:
@@ -383,6 +389,7 @@ class BeliefPolicyNode:
     retained_observation_probability: float
     discarded_observation_probability: float
     fallback_branch: Optional[BeliefPolicyBranch] = None
+    goal_probability_upper_bound: float = 1.0
 
     @property
     def observation_schema(self) -> Tuple[str, ...]:
@@ -470,13 +477,25 @@ class BeliefPolicyNode:
 
 @dataclass(frozen=True)
 class BeliefActionCertificate:
-    """Policy-only and belief-composed utility bounds for one root action."""
+    """Policy-only and belief-composed utility and goal-probability bounds
+    for one root action.
+
+    The ``policy_*`` fields are scoped to the supplied normalized belief;
+    the unprefixed bounds compose tracker-retained mass adversarially.
+    ``policy_goal_probability`` is exact for the executable (possibly
+    observation-pruned) policy; ``policy_goal_probability_upper_bound``
+    bounds the unrestricted full-observation optimum for this root action.
+    """
 
     action: Dict[str, object]
     policy_utility_lower_bound: float
     policy_utility_upper_bound: float
     utility_lower_bound: float
     utility_upper_bound: float
+    policy_goal_probability: float = 0.0
+    policy_goal_probability_upper_bound: float = 1.0
+    goal_probability_lower_bound: float = 0.0
+    goal_probability_upper_bound: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -492,6 +511,14 @@ class ConditionalBeliefPolicyResult:
     ``action_certificates`` additionally compose tracker-retained mass; the
     ``policy_*`` fields preserve the certificate scoped only to the supplied
     normalized belief.
+
+    Under a reliability constraint, ``feasible`` reports whether the
+    selected policy meets ``goal_probability_constraint`` (and the optional
+    ``branch_goal_probability_constraint``) against the supplied belief;
+    ``best_achievable_goal_probability`` is exact even when
+    ``constraint_optimality`` reports frontier truncation, and
+    ``constraint_certification`` scopes feasibility through pruning and
+    tracker mass like the utility certificates.
     """
 
     policy: BeliefPolicyNode
@@ -515,6 +542,12 @@ class ConditionalBeliefPolicyResult:
     belief_retained_probability_mass: Optional[float]
     certificate_scope: str
     observation_branching: bool = True
+    goal_probability_constraint: Optional[float] = None
+    branch_goal_probability_constraint: Optional[float] = None
+    feasible: Optional[bool] = None
+    best_achievable_goal_probability: Optional[float] = None
+    constraint_certification: Optional[str] = None
+    constraint_optimality: Optional[str] = None
 
     @property
     def action(self) -> Dict[str, object]:
@@ -869,6 +902,9 @@ class CompiledPlanner:
         max_observation_branches: int = 100_000,
         min_observation_probability: float = 0.0,
         max_observations_per_node: Optional[int] = None,
+        min_goal_probability: Optional[float] = None,
+        min_branch_goal_probability: Optional[float] = None,
+        max_frontier_points: int = 256,
         control: Optional[PlanControl] = None,
     ) -> (
         BeliefPlanResult
@@ -934,6 +970,28 @@ class CompiledPlanner:
         sequence, outcome-branch, policy-node, and observation-branch limits
         make exponential lookahead inspectable and provisionable.
 
+        ``min_goal_probability`` adds a chance constraint: feasibility
+        (policy goal probability at or above the floor) is decided first,
+        and utility ranks only the feasible candidates.  In conditional
+        planning the constraint is enforced over the whole policy — not per
+        node — via Pareto-frontier dynamic programming over
+        (goal probability, expected cost) pairs, so reliability spent in one
+        observation branch can compensate for another branch's ceiling.
+        ``min_branch_goal_probability`` optionally adds the stricter safety
+        variant: every observation branch's continuation must individually
+        satisfy the floor.  Infeasibility is reported, not raised: the most
+        reliable policy is returned with ``feasible=False`` and
+        ``best_achievable_goal_probability``.  ``max_frontier_points``
+        bounds each Pareto frontier; when the cap actually binds, the result
+        says ``constraint_optimality="frontier-truncated"`` (feasibility and
+        best-achievable stay exact; only cost-optimality may be lost).
+        ``constraint_certification`` composes observation pruning and
+        tracker-retained mass into ``certified-feasible``,
+        ``certified-infeasible``, or ``indeterminate``, scoped exactly like
+        the utility certificates.  Under a constraint, the utility-regret
+        fields still compare utilities across the reported per-action
+        policies; feasibility governs selection.
+
         ``control`` optionally supplies cooperative wall-clock limits,
         a cancellation callback, and progress reporting, mirroring
         :class:`modenexus.CompileControl` for compilation.  Cancellations
@@ -973,6 +1031,29 @@ class CompiledPlanner:
             raise ValueError(
                 "max_observations_per_node must be at least 1"
             )
+        for constraint_name, constraint_value in (
+            ("min_goal_probability", min_goal_probability),
+            ("min_branch_goal_probability", min_branch_goal_probability),
+        ):
+            if constraint_value is not None and (
+                not math.isfinite(constraint_value)
+                or constraint_value < 0.0
+                or constraint_value > 1.0
+            ):
+                raise ValueError(
+                    f"{constraint_name} must be finite and in [0, 1]"
+                )
+        if (
+            min_branch_goal_probability is not None
+            and observation_model is None
+        ):
+            raise ValueError(
+                "min_branch_goal_probability requires an observation_model: "
+                "without observation branching there are no per-branch "
+                "continuations to constrain"
+            )
+        if max_frontier_points < 2:
+            raise ValueError("max_frontier_points must be at least 2")
         if observation_model is not None and self.horizon < 2:
             raise ValueError(
                 "observation branching requires a planner horizon of at "
@@ -1238,6 +1319,7 @@ class CompiledPlanner:
                 "observation_branches": 0,
                 "generated_observation_branches": 0,
                 "pruned_observation_branches": 0,
+                "frontier_truncations": 0,
             }
 
             def sync_session() -> None:
@@ -1247,6 +1329,261 @@ class CompiledPlanner:
                     "observation_branches"
                 ]
 
+            def expand_action(
+                branch_belief: Sequence[Tuple[Dict[str, object], float]],
+                step: int,
+                action: object,
+                command: Dict[str, object],
+            ) -> List[Tuple[Dict[str, object], float]]:
+                """Count one policy node and expand this action's validated
+                stochastic outcomes over the belief."""
+                counters["policy_nodes"] += 1
+                sync_session()
+                session.check()
+                if counters["policy_nodes"] > max_policy_nodes:
+                    raise PlanningBudgetExceeded(
+                        "conditional belief lookahead exceeded "
+                        f"max_policy_nodes={max_policy_nodes}",
+                        session.snapshot(),
+                    )
+                expanded_outcomes: List[
+                    Tuple[Dict[str, object], float]
+                ] = []
+                for state, state_mass in branch_belief:
+                    base = step_evidence(state, step)
+                    base[f"{command_name}@{step}"] = action
+                    for updates, outcome_probability in (
+                        normalized_outcomes(state, command)
+                    ):
+                        counters["outcome_branches"] += 1
+                        if (
+                            counters["outcome_branches"]
+                            > max_outcome_branches
+                        ):
+                            sync_session()
+                            raise PlanningBudgetExceeded(
+                                "conditional belief lookahead exceeded "
+                                f"max_outcome_branches="
+                                f"{max_outcome_branches}",
+                                session.snapshot(),
+                            )
+                        next_state = dict(state)
+                        next_state.update(updates)
+                        transition_evidence = dict(base)
+                        transition_evidence.update(
+                            step_evidence(next_state, step + 1)
+                        )
+                        transition_evidence.update(
+                            {
+                                f"{name}@{step + 1}": value
+                                for name, value in updates.items()
+                                if name in self.obs_names
+                            }
+                        )
+                        if (
+                            self.system.log_evidence(transition_evidence)
+                            == -math.inf
+                        ):
+                            raise ValueError(
+                                "outcome_model produced a state "
+                                "inconsistent with planner: "
+                                f"{transition_evidence}"
+                            )
+                        expanded_outcomes.append(
+                            (
+                                next_state,
+                                state_mass * outcome_probability,
+                            )
+                        )
+                return expanded_outcomes
+
+            def terminal_node(
+                command: Dict[str, object],
+                immediate_cost: float,
+                expanded_outcomes: Sequence[
+                    Tuple[Dict[str, object], float]
+                ],
+                step: int,
+            ) -> BeliefPolicyNode:
+                expected_goal = sum(
+                    probability
+                    * conditional_goal_probability(
+                        step_evidence(
+                            next_state,
+                            step + 1,
+                            include_observables=True,
+                        ),
+                        step + 1,
+                    )
+                    for next_state, probability in expanded_outcomes
+                )
+                value = (
+                    goal_reward * expected_goal
+                    - cost_weight * immediate_cost
+                )
+                return BeliefPolicyNode(
+                    action=command,
+                    immediate_action_cost=immediate_cost,
+                    expected_goal_probability=expected_goal,
+                    expected_action_cost=immediate_cost,
+                    expected_utility=value,
+                    utility_upper_bound=value,
+                    branches=(),
+                    fallback_policy=None,
+                    retained_observation_probability=1.0,
+                    discarded_observation_probability=0.0,
+                    goal_probability_upper_bound=expected_goal,
+                )
+
+            def observation_groups(expanded_outcomes, command):
+                """Group outcomes by observation, then split retained from
+                pruned groups under the observation-pruning controls."""
+                grouped: Dict[
+                    Tuple[Tuple[str, object], ...],
+                    Dict[str, object],
+                ] = {}
+                for next_state, outcome_mass in expanded_outcomes:
+                    for (
+                        observation,
+                        observation_probability,
+                    ) in normalized_observations(next_state, command):
+                        observation_key = frozen_mapping(
+                            observation,
+                            label="observation",
+                        )
+                        state_key = frozen_mapping(
+                            next_state,
+                            label="state",
+                        )
+                        group = grouped.setdefault(
+                            observation_key,
+                            {
+                                "observation": observation,
+                                "states": {},
+                                "mass": 0.0,
+                            },
+                        )
+                        branch_mass = (
+                            outcome_mass * observation_probability
+                        )
+                        states = group["states"]
+                        if state_key in states:
+                            states[state_key][1] += branch_mass
+                        else:
+                            states[state_key] = [next_state, branch_mass]
+                        group["mass"] += branch_mass
+
+                groups = sorted(
+                    (
+                        group for group in grouped.values()
+                        if float(group["mass"]) > 0.0
+                    ),
+                    key=lambda group: -float(group["mass"]),
+                )
+                counters["generated_observation_branches"] += len(groups)
+                retained_groups = [
+                    group for group in groups
+                    if float(group["mass"]) >= min_observation_probability
+                ]
+                discarded_groups = [
+                    group for group in groups
+                    if float(group["mass"]) < min_observation_probability
+                ]
+                if (
+                    max_observations_per_node is not None
+                    and len(retained_groups) > max_observations_per_node
+                ):
+                    discarded_groups.extend(
+                        retained_groups[max_observations_per_node:]
+                    )
+                    retained_groups = retained_groups[
+                        :max_observations_per_node
+                    ]
+                counters["pruned_observation_branches"] += len(
+                    discarded_groups
+                )
+                discarded_probability = sum(
+                    float(group["mass"]) for group in discarded_groups
+                )
+                return retained_groups, discarded_groups, discarded_probability
+
+            def account_observation_branch() -> None:
+                counters["observation_branches"] += 1
+                if (
+                    counters["observation_branches"]
+                    > max_observation_branches
+                ):
+                    sync_session()
+                    raise PlanningBudgetExceeded(
+                        "conditional belief lookahead exceeded "
+                        f"max_observation_branches="
+                        f"{max_observation_branches}",
+                        session.snapshot(),
+                    )
+
+            def group_posterior(group):
+                probability = float(group["mass"])
+                return [
+                    (state, mass / probability)
+                    for state, mass in group["states"].values()
+                ]
+
+            def merged_fallback_belief(
+                discarded_groups, discarded_probability
+            ):
+                fallback_states: Dict[
+                    Tuple[Tuple[str, object], ...],
+                    List[object],
+                ] = {}
+                for group in discarded_groups:
+                    for state_key, (state, mass) in group["states"].items():
+                        if state_key in fallback_states:
+                            fallback_states[state_key][1] += mass
+                        else:
+                            fallback_states[state_key] = [state, mass]
+                return [
+                    (state, mass / discarded_probability)
+                    for state, mass in fallback_states.values()
+                ]
+
+            def retained_branch(group, probability, posterior, child):
+                return BeliefPolicyBranch(
+                    observation=dict(group["observation"]),
+                    probability=probability,
+                    expected_goal_probability=(
+                        child.expected_goal_probability
+                    ),
+                    expected_action_cost=child.expected_action_cost,
+                    expected_utility=child.expected_utility,
+                    policy=child,
+                    posterior=tuple(
+                        (dict(state), state_probability)
+                        for state, state_probability in posterior
+                    ),
+                )
+
+            def fallback_branch_for(
+                discarded_groups, discarded_probability, posterior, child
+            ):
+                return BeliefPolicyBranch(
+                    observation={},
+                    probability=discarded_probability,
+                    expected_goal_probability=(
+                        child.expected_goal_probability
+                    ),
+                    expected_action_cost=child.expected_action_cost,
+                    expected_utility=child.expected_utility,
+                    policy=child,
+                    posterior=tuple(
+                        (dict(state), state_probability)
+                        for state, state_probability in posterior
+                    ),
+                    contributing_observations=tuple(
+                        dict(group["observation"])
+                        for group in discarded_groups
+                    ),
+                )
+
             def solve_conditional_policy(
                 branch_belief: Sequence[
                     Tuple[Dict[str, object], float]
@@ -1255,101 +1592,18 @@ class CompiledPlanner:
             ) -> Tuple[BeliefPolicyNode, Tuple[BeliefPolicyNode, ...]]:
                 candidates: List[BeliefPolicyNode] = []
                 for action in action_values:
-                    counters["policy_nodes"] += 1
-                    sync_session()
-                    session.check()
-                    if counters["policy_nodes"] > max_policy_nodes:
-                        raise PlanningBudgetExceeded(
-                            "conditional belief lookahead exceeded "
-                            f"max_policy_nodes={max_policy_nodes}",
-                            session.snapshot(),
-                        )
                     command = {command_name: action}
-                    expanded_outcomes: List[
-                        Tuple[Dict[str, object], float]
-                    ] = []
-                    for state, state_mass in branch_belief:
-                        base = step_evidence(state, step)
-                        base[f"{command_name}@{step}"] = action
-                        for updates, outcome_probability in (
-                            normalized_outcomes(state, command)
-                        ):
-                            counters["outcome_branches"] += 1
-                            if (
-                                counters["outcome_branches"]
-                                > max_outcome_branches
-                            ):
-                                sync_session()
-                                raise PlanningBudgetExceeded(
-                                    "conditional belief lookahead exceeded "
-                                    f"max_outcome_branches="
-                                    f"{max_outcome_branches}",
-                                    session.snapshot(),
-                                )
-                            next_state = dict(state)
-                            next_state.update(updates)
-                            transition_evidence = dict(base)
-                            transition_evidence.update(
-                                step_evidence(next_state, step + 1)
-                            )
-                            transition_evidence.update(
-                                {
-                                    f"{name}@{step + 1}": value
-                                    for name, value in updates.items()
-                                    if name in self.obs_names
-                                }
-                            )
-                            if (
-                                self.system.log_evidence(
-                                    transition_evidence
-                                )
-                                == -math.inf
-                            ):
-                                raise ValueError(
-                                    "outcome_model produced a state "
-                                    "inconsistent with planner: "
-                                    f"{transition_evidence}"
-                                )
-                            expanded_outcomes.append(
-                                (
-                                    next_state,
-                                    state_mass * outcome_probability,
-                                )
-                            )
-
+                    expanded_outcomes = expand_action(
+                        branch_belief, step, action, command
+                    )
                     immediate_cost = action_cost(action, command)
                     if step + 1 == self.horizon:
-                        expected_goal = sum(
-                            probability
-                            * conditional_goal_probability(
-                                step_evidence(
-                                    next_state,
-                                    step + 1,
-                                    include_observables=True,
-                                ),
-                                step + 1,
-                            )
-                            for next_state, probability
-                            in expanded_outcomes
-                        )
                         candidates.append(
-                            BeliefPolicyNode(
-                                action=command,
-                                immediate_action_cost=immediate_cost,
-                                expected_goal_probability=expected_goal,
-                                expected_action_cost=immediate_cost,
-                                expected_utility=(
-                                    goal_reward * expected_goal
-                                    - cost_weight * immediate_cost
-                                ),
-                                utility_upper_bound=(
-                                    goal_reward * expected_goal
-                                    - cost_weight * immediate_cost
-                                ),
-                                branches=(),
-                                fallback_policy=None,
-                                retained_observation_probability=1.0,
-                                discarded_observation_probability=0.0,
+                            terminal_node(
+                                command,
+                                immediate_cost,
+                                expanded_outcomes,
+                                step,
                             )
                         )
                         if step == 0:
@@ -1359,199 +1613,64 @@ class CompiledPlanner:
                             )
                         continue
 
-                    grouped: Dict[
-                        Tuple[Tuple[str, object], ...],
-                        Dict[str, object],
-                    ] = {}
-                    for next_state, outcome_mass in expanded_outcomes:
-                        for (
-                            observation,
-                            observation_probability,
-                        ) in normalized_observations(
-                            next_state, command
-                        ):
-                            observation_key = frozen_mapping(
-                                observation,
-                                label="observation",
-                            )
-                            state_key = frozen_mapping(
-                                next_state,
-                                label="state",
-                            )
-                            group = grouped.setdefault(
-                                observation_key,
-                                {
-                                    "observation": observation,
-                                    "states": {},
-                                    "mass": 0.0,
-                                },
-                            )
-                            branch_mass = (
-                                outcome_mass
-                                * observation_probability
-                            )
-                            states = group["states"]
-                            if state_key in states:
-                                states[state_key][1] += branch_mass
-                            else:
-                                states[state_key] = [
-                                    next_state,
-                                    branch_mass,
-                                ]
-                            group["mass"] += branch_mass
-
-                    groups = sorted(
-                        (
-                            group for group in grouped.values()
-                            if float(group["mass"]) > 0.0
-                        ),
-                        key=lambda group: -float(group["mass"]),
-                    )
-                    counters["generated_observation_branches"] += len(
-                        groups
-                    )
-                    retained_groups = [
-                        group for group in groups
-                        if (
-                            float(group["mass"])
-                            >= min_observation_probability
-                        )
-                    ]
-                    discarded_groups = [
-                        group for group in groups
-                        if (
-                            float(group["mass"])
-                            < min_observation_probability
-                        )
-                    ]
-                    if (
-                        max_observations_per_node is not None
-                        and len(retained_groups)
-                        > max_observations_per_node
-                    ):
-                        discarded_groups.extend(
-                            retained_groups[max_observations_per_node:]
-                        )
-                        retained_groups = retained_groups[
-                            :max_observations_per_node
-                        ]
-                    counters["pruned_observation_branches"] += len(
-                        discarded_groups
-                    )
+                    (
+                        retained_groups,
+                        discarded_groups,
+                        discarded_probability,
+                    ) = observation_groups(expanded_outcomes, command)
 
                     branches: List[BeliefPolicyBranch] = []
                     expected_goal = 0.0
                     expected_continuation_cost = 0.0
                     continuation_utility_upper_bound = 0.0
+                    continuation_goal_upper_bound = 0.0
                     retained_path_probability = 0.0
-
-                    def account_observation_branch() -> None:
-                        counters["observation_branches"] += 1
-                        if (
-                            counters["observation_branches"]
-                            > max_observation_branches
-                        ):
-                            sync_session()
-                            raise PlanningBudgetExceeded(
-                                "conditional belief lookahead exceeded "
-                                f"max_observation_branches="
-                                f"{max_observation_branches}",
-                                session.snapshot(),
-                            )
 
                     for group in retained_groups:
                         probability = float(group["mass"])
                         account_observation_branch()
-                        posterior = [
-                            (state, mass / probability)
-                            for state, mass in group["states"].values()
-                        ]
+                        posterior = group_posterior(group)
                         child, _ = solve_conditional_policy(
                             posterior, step + 1
                         )
-                        branch_goal = child.expected_goal_probability
-                        branch_cost = child.expected_action_cost
-                        branch_utility = child.expected_utility
-                        expected_goal += probability * branch_goal
+                        expected_goal += (
+                            probability * child.expected_goal_probability
+                        )
                         expected_continuation_cost += (
-                            probability * branch_cost
+                            probability * child.expected_action_cost
                         )
                         continuation_utility_upper_bound += (
                             probability * child.utility_upper_bound
+                        )
+                        continuation_goal_upper_bound += (
+                            probability
+                            * child.goal_probability_upper_bound
                         )
                         retained_path_probability += (
                             probability
                             * child.retained_observation_probability
                         )
                         branches.append(
-                            BeliefPolicyBranch(
-                                observation=dict(group["observation"]),
-                                probability=probability,
-                                expected_goal_probability=branch_goal,
-                                expected_action_cost=branch_cost,
-                                expected_utility=branch_utility,
-                                policy=child,
-                                posterior=tuple(
-                                    (dict(state), state_probability)
-                                    for state, state_probability
-                                    in posterior
-                                ),
+                            retained_branch(
+                                group, probability, posterior, child
                             )
                         )
 
                     fallback_policy: Optional[BeliefPolicyNode] = None
                     fallback_branch: Optional[BeliefPolicyBranch] = None
-                    discarded_probability = sum(
-                        float(group["mass"])
-                        for group in discarded_groups
-                    )
                     if discarded_probability > 0.0:
                         account_observation_branch()
-                        fallback_states: Dict[
-                            Tuple[Tuple[str, object], ...],
-                            List[object],
-                        ] = {}
-                        for group in discarded_groups:
-                            for state_key, (
-                                state,
-                                mass,
-                            ) in group["states"].items():
-                                if state_key in fallback_states:
-                                    fallback_states[state_key][1] += mass
-                                else:
-                                    fallback_states[state_key] = [
-                                        state,
-                                        mass,
-                                    ]
-                        fallback_belief = [
-                            (state, mass / discarded_probability)
-                            for state, mass in fallback_states.values()
-                        ]
+                        fallback_belief = merged_fallback_belief(
+                            discarded_groups, discarded_probability
+                        )
                         fallback_policy, _ = solve_conditional_policy(
                             fallback_belief, step + 1
                         )
-                        fallback_branch = BeliefPolicyBranch(
-                            observation={},
-                            probability=discarded_probability,
-                            expected_goal_probability=(
-                                fallback_policy.expected_goal_probability
-                            ),
-                            expected_action_cost=(
-                                fallback_policy.expected_action_cost
-                            ),
-                            expected_utility=(
-                                fallback_policy.expected_utility
-                            ),
-                            policy=fallback_policy,
-                            posterior=tuple(
-                                (dict(state), state_probability)
-                                for state, state_probability
-                                in fallback_belief
-                            ),
-                            contributing_observations=tuple(
-                                dict(group["observation"])
-                                for group in discarded_groups
-                            ),
+                        fallback_branch = fallback_branch_for(
+                            discarded_groups,
+                            discarded_probability,
+                            fallback_belief,
+                            fallback_policy,
                         )
                         expected_goal += (
                             discarded_probability
@@ -1563,6 +1682,9 @@ class CompiledPlanner:
                         )
                         continuation_utility_upper_bound += (
                             discarded_probability * goal_reward
+                        )
+                        continuation_goal_upper_bound += (
+                            discarded_probability
                         )
 
                     expected_cost = (
@@ -1596,6 +1718,9 @@ class CompiledPlanner:
                                 discarded_probability
                             ),
                             fallback_branch=fallback_branch,
+                            goal_probability_upper_bound=min(
+                                1.0, continuation_goal_upper_bound
+                            ),
                         )
                     )
                     if step == 0:
@@ -1613,9 +1738,328 @@ class CompiledPlanner:
                 )
                 return candidates[0], tuple(candidates)
 
-            best_policy, root_evaluations = solve_conditional_policy(
-                checked_states, 0
-            )
+            def prune_frontier(points):
+                """Keep the nondominated (goal desc, cost asc) frontier,
+                capped at ``max_frontier_points`` with endpoints preserved.
+
+                Dominance pruning is lossless for the tree DP: any ancestor
+                combination using a dominated point can swap in the
+                dominating point with goal probability no worse and cost no
+                higher.  Capping only drops interior points, so feasibility
+                detection and the maximum achievable goal probability stay
+                exact; only cost-optimality can degrade, which the result
+                reports as ``frontier-truncated``.
+                """
+                points.sort(key=lambda point: (-point[0], point[1]))
+                kept = []
+                best_cost = math.inf
+                for point in points:
+                    if point[1] < best_cost - 1e-15:
+                        kept.append(point)
+                        best_cost = point[1]
+                if len(kept) > max_frontier_points:
+                    counters["frontier_truncations"] += 1
+                    span = len(kept) - 1
+                    picks = sorted({
+                        round(index * span / (max_frontier_points - 1))
+                        for index in range(max_frontier_points)
+                    })
+                    kept = [kept[index] for index in picks]
+                return kept
+
+            def solve_policy_frontier(
+                branch_belief: Sequence[
+                    Tuple[Dict[str, object], float]
+                ],
+                step: int,
+                branch_floor: Optional[float],
+            ) -> List[Tuple[float, float, BeliefPolicyNode]]:
+                """Pareto frontier of (goal probability, expected cost,
+                policy) points for this belief.
+
+                A chance constraint cannot be enforced per node: the
+                reliability one observation branch must deliver depends on
+                what the other branches deliver, so whole frontiers
+                propagate upward and the floor is applied only at the root.
+                ``branch_floor`` is the stricter per-branch variant and is
+                applied to every child frontier.
+                """
+                points: List[Tuple[float, float, BeliefPolicyNode]] = []
+                for action in action_values:
+                    command = {command_name: action}
+                    expanded_outcomes = expand_action(
+                        branch_belief, step, action, command
+                    )
+                    immediate_cost = action_cost(action, command)
+                    if step + 1 == self.horizon:
+                        node = terminal_node(
+                            command,
+                            immediate_cost,
+                            expanded_outcomes,
+                            step,
+                        )
+                        points.append(
+                            (
+                                node.expected_goal_probability,
+                                immediate_cost,
+                                node,
+                            )
+                        )
+                        continue
+
+                    (
+                        retained_groups,
+                        discarded_groups,
+                        discarded_probability,
+                    ) = observation_groups(expanded_outcomes, command)
+
+                    # (probability, posterior, group); group None marks the
+                    # aggregated pruned-observation fallback.
+                    branch_specs = []
+                    for group in retained_groups:
+                        account_observation_branch()
+                        branch_specs.append(
+                            (
+                                float(group["mass"]),
+                                group_posterior(group),
+                                group,
+                            )
+                        )
+                    if discarded_probability > 0.0:
+                        account_observation_branch()
+                        branch_specs.append(
+                            (
+                                discarded_probability,
+                                merged_fallback_belief(
+                                    discarded_groups,
+                                    discarded_probability,
+                                ),
+                                None,
+                            )
+                        )
+
+                    child_frontiers = []
+                    action_allowed = True
+                    goal_upper = 0.0
+                    utility_upper = 0.0
+                    for probability, posterior, group in branch_specs:
+                        frontier = solve_policy_frontier(
+                            posterior, step + 1, branch_floor
+                        )
+                        if group is None:
+                            # Pruned mass keeps the same maximum-credit
+                            # bound the unconstrained certificates use.
+                            goal_upper += probability
+                            utility_upper += probability * goal_reward
+                        else:
+                            goal_upper += probability * max(
+                                point[2].goal_probability_upper_bound
+                                for point in frontier
+                            )
+                            utility_upper += probability * max(
+                                point[2].utility_upper_bound
+                                for point in frontier
+                            )
+                        if branch_floor is not None:
+                            frontier = [
+                                point for point in frontier
+                                if point[0] >= branch_floor - 1e-9
+                            ]
+                        if not frontier:
+                            action_allowed = False
+                            break
+                        child_frontiers.append(frontier)
+                    if not action_allowed:
+                        continue
+
+                    combos = [(0.0, 0.0, ())]
+                    for (probability, _, _), frontier in zip(
+                        branch_specs, child_frontiers
+                    ):
+                        merged = []
+                        for goal_sum, cost_sum, chosen in combos:
+                            for point in frontier:
+                                merged.append(
+                                    (
+                                        goal_sum + probability * point[0],
+                                        cost_sum + probability * point[1],
+                                        chosen + (point,),
+                                    )
+                                )
+                        combos = prune_frontier(merged)
+
+                    action_points = []
+                    for expected_goal, continuation_cost, chosen in combos:
+                        branches: List[BeliefPolicyBranch] = []
+                        fallback_policy: Optional[BeliefPolicyNode] = None
+                        fallback_branch: Optional[
+                            BeliefPolicyBranch
+                        ] = None
+                        retained_path_probability = 0.0
+                        for (probability, posterior, group), point in zip(
+                            branch_specs, chosen
+                        ):
+                            child = point[2]
+                            if group is None:
+                                fallback_policy = child
+                                fallback_branch = fallback_branch_for(
+                                    discarded_groups,
+                                    discarded_probability,
+                                    posterior,
+                                    child,
+                                )
+                            else:
+                                retained_path_probability += (
+                                    probability
+                                    * child.retained_observation_probability
+                                )
+                                branches.append(
+                                    retained_branch(
+                                        group,
+                                        probability,
+                                        posterior,
+                                        child,
+                                    )
+                                )
+                        expected_cost = immediate_cost + continuation_cost
+                        node = BeliefPolicyNode(
+                            action=command,
+                            immediate_action_cost=immediate_cost,
+                            expected_goal_probability=expected_goal,
+                            expected_action_cost=expected_cost,
+                            expected_utility=(
+                                goal_reward * expected_goal
+                                - cost_weight * expected_cost
+                            ),
+                            utility_upper_bound=(
+                                utility_upper
+                                - cost_weight * immediate_cost
+                            ),
+                            branches=tuple(
+                                sorted(
+                                    branches,
+                                    key=lambda branch: -branch.probability,
+                                )
+                            ),
+                            fallback_policy=fallback_policy,
+                            retained_observation_probability=(
+                                retained_path_probability
+                            ),
+                            discarded_observation_probability=(
+                                discarded_probability
+                            ),
+                            fallback_branch=fallback_branch,
+                            goal_probability_upper_bound=min(
+                                1.0, goal_upper
+                            ),
+                        )
+                        action_points.append(
+                            (expected_goal, expected_cost, node)
+                        )
+                    if step == 0 and action_points:
+                        best_for_action = max(
+                            action_points,
+                            key=lambda point: point[2].expected_utility,
+                        )
+                        session.note_root_candidate(
+                            command, best_for_action[2].expected_utility
+                        )
+                    points.extend(action_points)
+                return prune_frontier(points)
+
+            constraint_extras: Dict[str, object] = {}
+            if (
+                min_goal_probability is not None
+                or min_branch_goal_probability is not None
+            ):
+                root_points = solve_policy_frontier(
+                    checked_states, 0, min_branch_goal_probability
+                )
+                branch_floor_satisfiable = bool(root_points)
+                if not root_points:
+                    # The per-branch floor eliminated every policy;
+                    # re-solve without it so infeasibility is reported with
+                    # a concrete best-effort policy, not an empty result.
+                    root_points = solve_policy_frontier(
+                        checked_states, 0, None
+                    )
+                if not branch_floor_satisfiable:
+                    feasible_points = []
+                elif min_goal_probability is not None:
+                    feasible_points = [
+                        point for point in root_points
+                        if point[0] >= min_goal_probability - 1e-9
+                    ]
+                else:
+                    feasible_points = list(root_points)
+                if feasible_points:
+                    feasible = True
+                    selected_point = max(
+                        feasible_points,
+                        key=lambda point: point[2].expected_utility,
+                    )
+                else:
+                    feasible = False
+                    selected_point = max(
+                        root_points, key=lambda point: point[0]
+                    )
+                best_policy = selected_point[2]
+
+                by_action: Dict[object, List] = {}
+                for point in root_points:
+                    by_action.setdefault(
+                        point[2].action[command_name], []
+                    ).append(point)
+                per_action_nodes = []
+                for action_points in by_action.values():
+                    if min_goal_probability is not None:
+                        action_feasible = [
+                            point for point in action_points
+                            if point[0] >= min_goal_probability - 1e-9
+                        ]
+                    else:
+                        action_feasible = action_points
+                    if action_feasible:
+                        choice = max(
+                            action_feasible,
+                            key=lambda point: point[2].expected_utility,
+                        )
+                    else:
+                        choice = max(
+                            action_points, key=lambda point: point[0]
+                        )
+                    per_action_nodes.append(choice[2])
+                alternatives = [
+                    node for node in per_action_nodes
+                    if node is not best_policy
+                ]
+                alternatives.sort(
+                    key=lambda item: (
+                        -round(item.expected_utility, 12),
+                        -round(item.expected_goal_probability, 12),
+                        round(item.expected_action_cost, 12),
+                    )
+                )
+                root_evaluations = tuple([best_policy] + alternatives)
+                constraint_extras = {
+                    "goal_probability_constraint": min_goal_probability,
+                    "branch_goal_probability_constraint": (
+                        min_branch_goal_probability
+                    ),
+                    "feasible": feasible,
+                    "best_achievable_goal_probability": max(
+                        point[0] for point in root_points
+                    ),
+                    "constraint_optimality": (
+                        "frontier-truncated"
+                        if counters["frontier_truncations"]
+                        else "exact"
+                    ),
+                }
+            else:
+                best_policy, root_evaluations = solve_conditional_policy(
+                    checked_states, 0
+                )
             sync_session()
             is_approximate = (
                 counters["pruned_observation_branches"] > 0
@@ -1697,6 +2141,22 @@ class CompiledPlanner:
                             * evaluation.immediate_action_cost
                         )
                     ),
+                    policy_goal_probability=(
+                        evaluation.expected_goal_probability
+                    ),
+                    policy_goal_probability_upper_bound=(
+                        evaluation.goal_probability_upper_bound
+                    ),
+                    goal_probability_lower_bound=(
+                        retained_mass_for_bounds
+                        * evaluation.expected_goal_probability
+                    ),
+                    goal_probability_upper_bound=min(
+                        1.0,
+                        retained_mass_for_bounds
+                        * evaluation.goal_probability_upper_bound
+                        + (1.0 - retained_mass_for_bounds),
+                    ),
                 )
                 for evaluation in root_evaluations
             )
@@ -1717,6 +2177,31 @@ class CompiledPlanner:
                 maximum_regret = 0.0
             root_action_certified = maximum_regret == 0.0
             belief_is_approximate = belief_exact is False
+            if min_goal_probability is not None:
+                # Feasibility certification composes the same scoped mass
+                # as the utility bounds: the selected policy's exact goal
+                # probability is a valid lower bound even under observation
+                # pruning, while certified infeasibility needs the
+                # unrestricted upper bound across every allowed action.
+                composed_goal_lower = (
+                    selected_certificate.goal_probability_lower_bound
+                )
+                composed_goal_upper_max = max(
+                    certificate.goal_probability_upper_bound
+                    for certificate in action_certificates
+                )
+                if composed_goal_lower >= min_goal_probability - 1e-9:
+                    constraint_extras["constraint_certification"] = (
+                        "certified-feasible"
+                    )
+                elif composed_goal_upper_max < min_goal_probability - 1e-9:
+                    constraint_extras["constraint_certification"] = (
+                        "certified-infeasible"
+                    )
+                else:
+                    constraint_extras["constraint_certification"] = (
+                        "indeterminate"
+                    )
             session.finish()
             return ConditionalBeliefPolicyResult(
                 policy=best_policy,
@@ -1782,6 +2267,7 @@ class CompiledPlanner:
                     supplied_retained_mass
                 ),
                 certificate_scope=certificate_scope,
+                **constraint_extras,
             )
 
         if self.horizon > 1:
@@ -1910,7 +2396,34 @@ class CompiledPlanner:
                     -sum(item.expected_goal_probabilities),
                 )
             )
-            best_sequence = sequence_evaluations[0]
+            sequence_extras: Dict[str, object] = {}
+            if min_goal_probability is not None:
+                feasible_sequences = [
+                    evaluation for evaluation in sequence_evaluations
+                    if (
+                        evaluation.expected_goal_probability
+                        >= min_goal_probability - 1e-9
+                    )
+                ]
+                if feasible_sequences:
+                    best_sequence = feasible_sequences[0]
+                    sequence_feasible = True
+                else:
+                    best_sequence = max(
+                        sequence_evaluations,
+                        key=lambda item: item.expected_goal_probability,
+                    )
+                    sequence_feasible = False
+                sequence_extras = {
+                    "goal_probability_constraint": min_goal_probability,
+                    "feasible": sequence_feasible,
+                    "best_achievable_goal_probability": max(
+                        evaluation.expected_goal_probability
+                        for evaluation in sequence_evaluations
+                    ),
+                }
+            else:
+                best_sequence = sequence_evaluations[0]
             session.finish()
             return BeliefPolicyResult(
                 commands=tuple(
@@ -1925,6 +2438,7 @@ class CompiledPlanner:
                     best_sequence.expected_goal_probabilities
                 ),
                 evaluations=tuple(sequence_evaluations),
+                **sequence_extras,
             )
 
         evaluations: List[BeliefActionEvaluation] = []
@@ -1976,7 +2490,34 @@ class CompiledPlanner:
             session.note_root_candidate(command, utility)
 
         evaluations.sort(key=lambda item: -item.expected_utility)
-        best = evaluations[0]
+        action_extras: Dict[str, object] = {}
+        if min_goal_probability is not None:
+            feasible_actions = [
+                evaluation for evaluation in evaluations
+                if (
+                    evaluation.expected_goal_probability
+                    >= min_goal_probability - 1e-9
+                )
+            ]
+            if feasible_actions:
+                best = feasible_actions[0]
+                action_feasible = True
+            else:
+                best = max(
+                    evaluations,
+                    key=lambda item: item.expected_goal_probability,
+                )
+                action_feasible = False
+            action_extras = {
+                "goal_probability_constraint": min_goal_probability,
+                "feasible": action_feasible,
+                "best_achievable_goal_probability": max(
+                    evaluation.expected_goal_probability
+                    for evaluation in evaluations
+                ),
+            }
+        else:
+            best = evaluations[0]
         session.finish()
         return BeliefPlanResult(
             action=dict(best.action),
@@ -1984,6 +2525,7 @@ class CompiledPlanner:
             action_cost=best.action_cost,
             expected_utility=best.expected_utility,
             evaluations=tuple(evaluations),
+            **action_extras,
         )
 
     def estimate(
