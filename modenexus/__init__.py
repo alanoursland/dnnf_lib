@@ -50,6 +50,7 @@ from .formula import And, Formula, Not, Or, Prop, at_most_one, exactly_one, iff,
 from .kbest import enumerate_map, enumerate_models
 from .planning import (
     BeliefActionEvaluation,
+    BeliefActionCertificate,
     BeliefPlanResult,
     BeliefPolicyBranch,
     BeliefPolicyNode,
@@ -62,7 +63,7 @@ from .planning import (
     PlannerCostBreakdown,
     TransitionCost,
 )
-from .tracking import ModeTracker, TrackingStepInfo
+from .tracking import ModeTracker, TrackedBelief, TrackingStepInfo
 from . import nnf_io
 
 __version__ = "0.1.0"
@@ -95,9 +96,11 @@ __all__ = [
     "enumerate_models",
     "minfill_order",
     "ModeTracker",
+    "TrackedBelief",
     "TrackingStepInfo",
     "Planner",
     "BeliefActionEvaluation",
+    "BeliefActionCertificate",
     "BeliefPlanResult",
     "BeliefPolicyBranch",
     "BeliefPolicyNode",

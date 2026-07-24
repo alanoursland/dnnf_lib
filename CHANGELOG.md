@@ -85,6 +85,14 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   alternative upper bound; otherwise it remains explicitly `"heuristic"`.
   Bounds use the maximum remaining reward on collapsed observation branches
   and require no exact reference run.
+- **GAP-013 — tracker/planner certificate composition:** `ModeTracker.belief`
+  now returns a list-compatible `TrackedBelief` with exactness and
+  retained-mass metadata. Conditional planning composes known retained mass
+  adversarially into per-action bounds and reports certificate scope,
+  policy-only certification, and end-to-end certification separately.
+  Unknown tracker mass receives conservative missing-state bounds, preventing
+  a certificate valid only for a normalized beam from being presented as an
+  exact-posterior guarantee.
 
 ### Documentation and examples
 
@@ -103,13 +111,15 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   controller to use explicit observation pruning with fallback behavior.
 - Updated the pruning-tradeoff experiment to compare retrospective exact
   regret with the public worst-case regret certificate.
+- Updated the tracker-certificate experiment to distinguish policy-only and
+  end-to-end root-action guarantees.
 - Updated the black-box edge-case experiment and archived GAP-001 through
-  GAP-012 under `modenexus_apps/gaps/fixed`.
+  GAP-013 under `modenexus_apps/gaps/fixed`.
 
 ### Verification
 
 - ModeNexus test suite: **309 passed, 7 skipped**.
 - Black-box API edge-case checks: all fixed cases report `OK`.
-- Companion applications: all **38 non-PyTorch tests passed**. The optional
+- Companion applications: all **39 non-PyTorch tests passed**. The optional
   PyTorch verification was not run because PyTorch was unavailable in the
   verification environment.

@@ -198,6 +198,17 @@ class BeliefPolicyNode:
 
 
 @dataclass(frozen=True)
+class BeliefActionCertificate:
+    """Policy-only and belief-composed utility bounds for one root action."""
+
+    action: Dict[str, object]
+    policy_utility_lower_bound: float
+    policy_utility_upper_bound: float
+    utility_lower_bound: float
+    utility_upper_bound: float
+
+
+@dataclass(frozen=True)
 class ConditionalBeliefPolicyResult:
     """Best bounded policy tree and all alternative root actions.
 
@@ -207,6 +218,9 @@ class ConditionalBeliefPolicyResult:
     full-observation optimum. Per-action upper bounds use the maximum
     remaining reward on collapsed branches. Root ranking is certified when
     the selected lower bound dominates every alternative upper bound.
+    ``action_certificates`` additionally compose tracker-retained mass; the
+    ``policy_*`` fields preserve the certificate scoped only to the supplied
+    normalized belief.
     """
 
     policy: BeliefPolicyNode
@@ -223,6 +237,12 @@ class ConditionalBeliefPolicyResult:
     optimal_utility_upper_bound: float
     maximum_regret: float
     root_action_certified: bool
+    action_certificates: Tuple[BeliefActionCertificate, ...]
+    policy_maximum_regret: float
+    policy_root_action_certified: bool
+    belief_exact: Optional[bool]
+    belief_retained_probability_mass: Optional[float]
+    certificate_scope: str
     observation_branching: bool = True
 
     @property
@@ -245,12 +265,12 @@ class ConditionalBeliefPolicyResult:
 
     @property
     def utility_lower_bound(self) -> float:
-        return self.policy.utility_lower_bound
+        return self.action_certificates[0].utility_lower_bound
 
     @property
     def utility_upper_bound(self) -> float:
-        """Upper bound for the selected root action's unrestricted policy."""
-        return self.policy.utility_upper_bound
+        """Belief-composed upper bound for the selected root action."""
+        return self.action_certificates[0].utility_upper_bound
 
     @property
     def discarded_observation_probability(self) -> float:
@@ -596,7 +616,10 @@ class CompiledPlanner:
         :meth:`modenexus.ModeTracker.belief`: ``[(joint_state, mass), ...]``.
         Masses are validated and normalized; correlations between modes are
         preserved.  State keys not used by this planner are ignored, and
-        omitted planner modes remain latent.
+        omitted planner modes remain latent. Tracker beliefs also carry
+        exactness and retained-mass metadata. Conditional-policy certificates
+        compose that metadata adversarially; unknown tracker mass prevents a
+        beam-only certificate from being presented as end-to-end.
 
         By default, transition-selector weights in the compiled planner
         define ``P(target at step 1 | state, action)``.  ``outcome_model`` can
@@ -678,6 +701,34 @@ class CompiledPlanner:
             raise KeyError(
                 f"unknown planner target variables: {sorted(unknown_targets)}"
             )
+
+        belief_exact = getattr(belief, "exact", None)
+        if belief_exact not in (True, False, None):
+            raise ValueError("belief exactness metadata must be boolean")
+        supplied_retained_mass = getattr(
+            belief,
+            "retained_probability_mass",
+            None,
+        )
+        if supplied_retained_mass is not None:
+            try:
+                supplied_retained_mass = float(supplied_retained_mass)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "belief retained probability mass must be finite and "
+                    "in [0, 1]"
+                ) from None
+            if (
+                not math.isfinite(supplied_retained_mass)
+                or supplied_retained_mass < 0.0
+                or supplied_retained_mass > 1.0
+            ):
+                raise ValueError(
+                    "belief retained probability mass must be finite and "
+                    "in [0, 1]"
+                )
+        if belief_exact is True:
+            supplied_retained_mass = 1.0
 
         weighted_states = list(belief)
         if not weighted_states:
@@ -1234,21 +1285,103 @@ class CompiledPlanner:
             is_approximate = (
                 counters["pruned_observation_branches"] > 0
             )
-            alternative_upper_bound = max(
+            policy_alternative_upper_bound = max(
                 (
                     evaluation.utility_upper_bound
                     for evaluation in root_evaluations[1:]
                 ),
                 default=-math.inf,
             )
+            policy_maximum_regret = max(
+                0.0,
+                policy_alternative_upper_bound
+                - best_policy.utility_lower_bound,
+            )
+            if policy_maximum_regret <= 1e-12:
+                policy_maximum_regret = 0.0
+            policy_root_action_certified = (
+                policy_maximum_regret == 0.0
+            )
+
+            if belief_exact is True:
+                retained_mass_for_bounds = 1.0
+                certificate_scope = "exact-tracker-belief"
+            elif belief_exact is False:
+                retained_mass_for_bounds = (
+                    0.0
+                    if supplied_retained_mass is None
+                    else supplied_retained_mass
+                )
+                certificate_scope = (
+                    "tracked-belief-mass-bound"
+                    if supplied_retained_mass is not None
+                    else "tracked-belief-mass-unknown"
+                )
+            else:
+                # Backward-compatible caller-supplied beliefs have no source
+                # metadata. Bounds remain explicitly scoped to that supplied
+                # distribution rather than claiming tracker exactness.
+                retained_mass_for_bounds = 1.0
+                certificate_scope = "caller-supplied-belief"
+
+            max_action_cost = max(
+                evaluation.immediate_action_cost
+                for evaluation in root_evaluations
+            )
+            missing_future_cost = (
+                max(0, self.horizon - 1) * max_action_cost
+            )
+            action_certificates = tuple(
+                BeliefActionCertificate(
+                    action=dict(evaluation.action),
+                    policy_utility_lower_bound=(
+                        evaluation.utility_lower_bound
+                    ),
+                    policy_utility_upper_bound=(
+                        evaluation.utility_upper_bound
+                    ),
+                    utility_lower_bound=(
+                        retained_mass_for_bounds
+                        * evaluation.utility_lower_bound
+                        + (1.0 - retained_mass_for_bounds)
+                        * (
+                            -cost_weight
+                            * (
+                                evaluation.immediate_action_cost
+                                + missing_future_cost
+                            )
+                        )
+                    ),
+                    utility_upper_bound=(
+                        retained_mass_for_bounds
+                        * evaluation.utility_upper_bound
+                        + (1.0 - retained_mass_for_bounds)
+                        * (
+                            goal_reward
+                            - cost_weight
+                            * evaluation.immediate_action_cost
+                        )
+                    ),
+                )
+                for evaluation in root_evaluations
+            )
+            selected_certificate = action_certificates[0]
+            alternative_upper_bound = max(
+                (
+                    certificate.utility_upper_bound
+                    for certificate in action_certificates[1:]
+                ),
+                default=-math.inf,
+            )
             maximum_regret = max(
                 0.0,
                 alternative_upper_bound
-                - best_policy.utility_lower_bound,
+                - selected_certificate.utility_lower_bound,
             )
             if maximum_regret <= 1e-12:
                 maximum_regret = 0.0
             root_action_certified = maximum_regret == 0.0
+            belief_is_approximate = belief_exact is False
             return ConditionalBeliefPolicyResult(
                 policy=best_policy,
                 evaluations=root_evaluations,
@@ -1267,26 +1400,52 @@ class CompiledPlanner:
                     best_policy.retained_observation_probability
                 ),
                 approximation=(
-                    "observation-pruned"
-                    if is_approximate
-                    else "exact"
+                    "belief-and-observation-approximate"
+                    if belief_is_approximate and is_approximate
+                    else (
+                        "belief-approximate"
+                        if belief_is_approximate
+                        else (
+                            "observation-pruned"
+                            if is_approximate
+                            else "exact"
+                        )
+                    )
                 ),
                 action_ranking=(
-                    "exact"
-                    if not is_approximate
+                    "certified"
+                    if root_action_certified and (
+                        belief_is_approximate or is_approximate
+                    )
                     else (
-                        "certified"
-                        if root_action_certified
+                        "exact"
+                        if (
+                            root_action_certified
+                            and not belief_is_approximate
+                            and not is_approximate
+                        )
                         else "heuristic"
                     )
                 ),
-                utility_is_lower_bound=is_approximate,
+                utility_is_lower_bound=(
+                    is_approximate or belief_is_approximate
+                ),
                 optimal_utility_upper_bound=max(
-                    evaluation.utility_upper_bound
-                    for evaluation in root_evaluations
+                    certificate.utility_upper_bound
+                    for certificate in action_certificates
                 ),
                 maximum_regret=maximum_regret,
                 root_action_certified=root_action_certified,
+                action_certificates=action_certificates,
+                policy_maximum_regret=policy_maximum_regret,
+                policy_root_action_certified=(
+                    policy_root_action_certified
+                ),
+                belief_exact=belief_exact,
+                belief_retained_probability_mass=(
+                    supplied_retained_mass
+                ),
+                certificate_scope=certificate_scope,
             )
 
         if self.horizon > 1:

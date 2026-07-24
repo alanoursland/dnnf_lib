@@ -141,6 +141,9 @@ ergonomics findings from that experiment). `ModeTracker(system, exact=True)`
 computes the required joint-state capacity automatically, guarded by
 `max_exact_states`; approximate trackers expose `last_step_info` with
 expansion/beam truncation and retained-mass diagnostics.
+`ModeTracker.belief()` returns a list-compatible `TrackedBelief` carrying
+exactness and retained-mass metadata, so downstream planners can distinguish
+an exact posterior from a normalized truncated beam.
 
 Beyond ranked diagnoses: `value_of_information` scores which sensor to
 read next (expected entropy reduction, in nats),
@@ -187,6 +190,10 @@ on the exact full-observation optimum. Every evaluated root action exposes
 utility lower and upper bounds. The overall result reports the unrestricted
 optimal-utility upper bound and maximum root-action regret; the root action
 is certified when its lower bound dominates every alternative upper bound.
+When the input is a `TrackedBelief`, the planner composes tracker uncertainty
+into separate end-to-end action bounds. Results preserve the policy-only
+certificate, report certificate scope, and refuse to present a beam-only
+certificate as end-to-end when tracker mass is unknown.
 
 ## GPU / batched evaluation (PyTorch)
 

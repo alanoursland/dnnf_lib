@@ -40,6 +40,28 @@ ModeAssignment = Tuple[Tuple[str, str], ...]  # sorted ((var, value), ...)
 Transitions = Dict[str, Dict[str, Dict[str, float]]]
 
 
+class TrackedBelief(list):
+    """Normalized tracker belief carrying approximation metadata.
+
+    This remains a ``list`` for compatibility with existing consumers.
+    ``retained_probability_mass`` is a lower bound relative to the exact
+    posterior when known; ``None`` means no nontrivial mass certificate is
+    available.
+    """
+
+    def __init__(
+        self,
+        values,
+        *,
+        exact: bool,
+        retained_probability_mass: Optional[float],
+    ) -> None:
+        super().__init__(values)
+        self.exact = exact
+        self.retained_probability_mass = retained_probability_mass
+        self.source = "ModeTracker"
+
+
 @dataclass(frozen=True)
 class TrackingStepInfo:
     """Diagnostics for the most recent filtering step."""
@@ -95,9 +117,12 @@ class ModeTracker:
         Safety limit for ``exact=True``.  Raise it deliberately when the
         computed state-space size is acceptable for the deployment.
 
-    ``last_step_info`` reports whether expansion or final beam selection
-    truncated an approximate update.  Retained probability mass is reported
-    whenever all successor expansions were enumerated.
+    ``belief()`` returns a list-compatible :class:`TrackedBelief` carrying
+    exactness and retained-mass metadata for downstream certificate
+    composition. ``last_step_info`` reports whether expansion or final beam
+    selection truncated an update. Retained posterior mass is reported only
+    when the predecessor belief was exact and all successor expansions were
+    enumerated; otherwise it is conservatively unknown.
     """
 
     def __init__(
@@ -155,14 +180,26 @@ class ModeTracker:
         self.transitions = transitions
         # Belief: {mode assignment: log mass}, unnormalized.
         self._belief: Dict[ModeAssignment, float] = {}
+        self._belief_exact = False
+        self._retained_probability_mass: Optional[float] = None
         self.t = 0
         self.last_step_info: Optional[TrackingStepInfo] = None
         self._init_belief()
 
     def _init_belief(self) -> None:
         log_w = self.system.log_weights_for({})
-        for cost, modes in self.system.ranked_map(log_w, self.beam):
+        ranked = self.system.ranked_map(log_w, self.beam)
+        for cost, modes in ranked:
             self._belief[tuple(sorted(modes.items()))] = -cost
+        retained_log_mass = _logsumexp([-cost for cost, _ in ranked])
+        total_log_mass = self.system.log_evidence({})
+        self._retained_probability_mass = min(
+            1.0,
+            math.exp(retained_log_mass - total_log_mass),
+        )
+        # ``expand`` affects the next update, not whether the current
+        # initialization enumerated the complete mode space.
+        self._belief_exact = self.beam >= self.joint_state_count
 
     # ------------------------------------------------------------------
     def step(
@@ -187,6 +224,7 @@ class ModeTracker:
             step_transitions.update(transitions)
         candidates: Dict[ModeAssignment, List[float]] = {}
         previous_states = len(self._belief)
+        previous_belief_exact = self._belief_exact
         expansion_truncated = False
         for modes_key, log_mass in self._belief.items():
             prev = dict(modes_key)
@@ -235,10 +273,18 @@ class ModeTracker:
         # Renormalize to keep log masses well-scaled over long runs.
         z = _logsumexp([v for _, v in top])
         retained_probability_mass = None
-        if not expansion_truncated:
+        if not expansion_truncated and previous_belief_exact:
             all_z = _logsumexp(list(merged.values()))
             retained_probability_mass = math.exp(z - all_z)
         self._belief = {k: v - z for k, v in top}
+        self._belief_exact = (
+            previous_belief_exact
+            and not expansion_truncated
+            and not beam_truncated
+        )
+        self._retained_probability_mass = (
+            1.0 if self._belief_exact else retained_probability_mass
+        )
         self.t += 1
         self.last_step_info = TrackingStepInfo(
             timestep=self.t,
@@ -249,16 +295,20 @@ class ModeTracker:
             expansion_truncated=expansion_truncated,
             beam_truncated=beam_truncated,
             retained_probability_mass=retained_probability_mass,
-            exact=self.is_exact and not expansion_truncated and not beam_truncated,
+            exact=self._belief_exact,
         )
         return self.belief()
 
     # ------------------------------------------------------------------
-    def belief(self) -> List[Tuple[Dict[str, str], float]]:
-        """Current belief, normalized over the beam, most probable first."""
+    def belief(self) -> TrackedBelief:
+        """Current normalized beam plus exactness and retained-mass metadata."""
         z = _logsumexp(list(self._belief.values()))
         ranked = sorted(self._belief.items(), key=lambda kv: -kv[1])
-        return [(dict(k), math.exp(v - z)) for k, v in ranked]
+        return TrackedBelief(
+            [(dict(k), math.exp(v - z)) for k, v in ranked],
+            exact=self._belief_exact,
+            retained_probability_mass=self._retained_probability_mass,
+        )
 
     def marginals(self) -> Dict[str, Dict[str, float]]:
         """Per-mode-variable marginals of the current belief."""

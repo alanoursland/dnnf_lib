@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from modenexus import Planner, iff
+from modenexus import Planner, TrackedBelief, iff
 
 
 def repair_planner(horizon=1):
@@ -312,6 +312,44 @@ def test_plan_belief_prunes_rare_observations_into_fallback():
     assert aggressive.maximum_regret == pytest.approx(0.005)
     assert aggressive.optimal_utility_upper_bound == pytest.approx(1.0)
 
+    tracked = planner.plan_belief(
+        belief=TrackedBelief(
+            [({"mode": "a"}, 0.5), ({"mode": "b"}, 0.5)],
+            exact=False,
+            retained_probability_mass=None,
+        ),
+        target={"done": True},
+        outcome_model=repair_outcomes,
+        observation_model=observations,
+        action_costs={"none": 0.0, "fix_a": 0.0, "fix_b": 0.2},
+        cost_weight=0.1,
+        min_observation_probability=0.01,
+    )
+    assert tracked.policy_root_action_certified
+    assert not tracked.root_action_certified
+    assert tracked.action_ranking == "heuristic"
+    assert tracked.maximum_regret > 0.0
+    assert tracked.belief_exact is False
+    assert tracked.belief_retained_probability_mass is None
+    assert tracked.certificate_scope == "tracked-belief-mass-unknown"
+
+    bounded = planner.plan_belief(
+        belief=TrackedBelief(
+            [({"mode": "a"}, 0.5), ({"mode": "b"}, 0.5)],
+            exact=False,
+            retained_probability_mass=0.99,
+        ),
+        target={"done": True},
+        outcome_model=repair_outcomes,
+        observation_model=observations,
+        action_costs={"none": 0.0, "fix_a": 0.0, "fix_b": 0.2},
+        cost_weight=0.1,
+        min_observation_probability=0.01,
+    )
+    assert bounded.certificate_scope == "tracked-belief-mass-bound"
+    assert bounded.belief_retained_probability_mass == pytest.approx(0.99)
+    assert bounded.maximum_regret < tracked.maximum_regret
+
 
 def test_plan_belief_skips_observations_after_final_action():
     calls = []
@@ -321,7 +359,11 @@ def test_plan_belief_skips_observations_after_final_action():
         return {"mode": state["mode"]}
 
     result = repair_planner(horizon=2).plan_belief(
-        belief=[({"mode": "a"}, 0.5), ({"mode": "b"}, 0.5)],
+        belief=TrackedBelief(
+            [({"mode": "a"}, 0.5), ({"mode": "b"}, 0.5)],
+            exact=True,
+            retained_probability_mass=1.0,
+        ),
         target={"done": True},
         outcome_model=repair_outcomes,
         observation_model=observations,
@@ -335,6 +377,9 @@ def test_plan_belief_skips_observations_after_final_action():
     assert result.utility_lower_bound == pytest.approx(
         result.utility_upper_bound
     )
+    assert result.belief_exact is True
+    assert result.belief_retained_probability_mass == pytest.approx(1.0)
+    assert result.certificate_scope == "exact-tracker-belief"
     assert result.retained_observation_probability == pytest.approx(1.0)
     assert len(calls) == 6
     assert all(not branch.policy.branches for branch in result.policy.branches)

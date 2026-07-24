@@ -172,8 +172,14 @@ def test_step_info_reports_approximation():
     m = SystemModel()
     m.mode("m", ("a", "b", "c"), priors=(0.6, 0.3, 0.1))
     tracker = ModeTracker(m.compile(), beam=1, expand=1)
+    initial = tracker.belief()
+    assert not initial.exact
+    assert initial.retained_probability_mass == pytest.approx(0.6)
     tracker.step({})
     info = tracker.last_step_info
     assert info.expansion_truncated
     assert info.retained_probability_mass is None
     assert not info.exact
+    belief = tracker.belief()
+    assert not belief.exact
+    assert belief.retained_probability_mass is None
