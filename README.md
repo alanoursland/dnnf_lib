@@ -173,7 +173,17 @@ callbacks may be deterministic mappings or probability-weighted mappings,
 so the same surface represents perfect, partial, or noisy sensing.
 `max_policy_nodes`, `max_outcome_branches`, and
 `max_observation_branches` make conditional-policy expansion explicit; the
-result reports all three realized expansion counts.
+result reports all three realized expansion counts. Observations after the
+final action are not expanded because no decision remains.
+
+For noisy sensors with many low-probability readings, set
+`min_observation_probability` and/or `max_observations_per_node`. Pruned
+readings are merged into an optimized fallback posterior rather than
+dropped, and `BeliefPolicyNode.continuation()` routes unmatched observations
+through that fallback. Results report generated and pruned branches,
+retained/discarded observation probability, whether action ranking is
+heuristic, and whether the returned utility is a lower bound on the exact
+full-observation optimum.
 
 ## GPU / batched evaluation (PyTorch)
 

@@ -163,7 +163,12 @@ class BeliefPolicyBranch:
 
 @dataclass(frozen=True)
 class BeliefPolicyNode:
-    """One action and its observation-contingent continuations."""
+    """One action and its observation-contingent continuations.
+
+    ``fallback_policy`` receives observations omitted by threshold or top-k
+    pruning. ``retained_observation_probability`` includes all later levels;
+    ``discarded_observation_probability`` is local to this node.
+    """
 
     action: Dict[str, object]
     immediate_action_cost: float
@@ -171,17 +176,42 @@ class BeliefPolicyNode:
     expected_action_cost: float
     expected_utility: float
     branches: Tuple[BeliefPolicyBranch, ...]
+    fallback_policy: Optional["BeliefPolicyNode"]
+    retained_observation_probability: float
+    discarded_observation_probability: float
+
+    def continuation(
+        self, observation: Mapping[str, object]
+    ) -> Optional["BeliefPolicyNode"]:
+        """Return the matching continuation or the pruned-observation fallback."""
+        observed = dict(observation)
+        for branch in self.branches:
+            if branch.observation == observed:
+                return branch.policy
+        return self.fallback_policy
 
 
 @dataclass(frozen=True)
 class ConditionalBeliefPolicyResult:
-    """Best bounded policy tree and all alternative root actions."""
+    """Best bounded policy tree and all alternative root actions.
+
+    Approximate results preserve all probability mass by merging pruned
+    observations into fallback posteriors. Their utility is the exact value
+    of that coarsened policy and a lower bound on the unrestricted
+    full-observation optimum; root action ranking is heuristic.
+    """
 
     policy: BeliefPolicyNode
     evaluations: Tuple[BeliefPolicyNode, ...]
     policy_node_count: int
     outcome_branch_count: int
     observation_branch_count: int
+    generated_observation_branch_count: int
+    pruned_observation_branch_count: int
+    retained_observation_probability: float
+    approximation: str
+    action_ranking: str
+    utility_is_lower_bound: bool
     observation_branching: bool = True
 
     @property
@@ -201,6 +231,11 @@ class ConditionalBeliefPolicyResult:
     @property
     def expected_utility(self) -> float:
         return self.policy.expected_utility
+
+    @property
+    def discarded_observation_probability(self) -> float:
+        """Selected-policy probability routed through a fallback branch."""
+        return max(0.0, 1.0 - self.retained_observation_probability)
 
 
 class Planner:
@@ -521,6 +556,8 @@ class CompiledPlanner:
         max_outcome_branches: int = 100_000,
         max_policy_nodes: int = 100_000,
         max_observation_branches: int = 100_000,
+        min_observation_probability: float = 0.0,
+        max_observations_per_node: Optional[int] = None,
     ) -> (
         BeliefPlanResult
         | BeliefPolicyResult
@@ -557,6 +594,14 @@ class CompiledPlanner:
         state itself implements perfect observation; returning an empty
         mapping implements no information.
 
+        Approximate conditional planning can set
+        ``min_observation_probability`` and/or
+        ``max_observations_per_node``. Rare observation groups are merged
+        into one fallback posterior rather than removed from the expected
+        value. The returned policy routes unmatched observations through
+        ``BeliefPolicyNode.fallback_policy`` and reports retained probability
+        mass, pruning counts, and heuristic action-ranking status.
+
         Utility is ``goal_reward * P(target) - cost_weight * action_cost``.
         For a single command variable, ``action_costs`` is either a mapping
         from command values to costs or a callable receiving the command
@@ -580,6 +625,21 @@ class CompiledPlanner:
             raise ValueError("max_policy_nodes must be at least 1")
         if max_observation_branches < 1:
             raise ValueError("max_observation_branches must be at least 1")
+        if (
+            not math.isfinite(min_observation_probability)
+            or min_observation_probability < 0.0
+            or min_observation_probability >= 1.0
+        ):
+            raise ValueError(
+                "min_observation_probability must be finite and in [0, 1)"
+            )
+        if (
+            max_observations_per_node is not None
+            and max_observations_per_node < 1
+        ):
+            raise ValueError(
+                "max_observations_per_node must be at least 1"
+            )
         if observation_model is not None and self.horizon < 2:
             raise ValueError(
                 "observation branching requires a planner horizon of at "
@@ -824,26 +884,9 @@ class CompiledPlanner:
                 "policy_nodes": 0,
                 "outcome_branches": 0,
                 "observation_branches": 0,
+                "generated_observation_branches": 0,
+                "pruned_observation_branches": 0,
             }
-
-            def terminal_goal_probability(
-                branch_belief: Sequence[
-                    Tuple[Dict[str, object], float]
-                ],
-                step: int,
-            ) -> float:
-                return sum(
-                    mass
-                    * conditional_goal_probability(
-                        step_evidence(
-                            state,
-                            step,
-                            include_observables=True,
-                        ),
-                        step,
-                    )
-                    for state, mass in branch_belief
-                )
 
             def solve_conditional_policy(
                 branch_belief: Sequence[
@@ -860,10 +903,9 @@ class CompiledPlanner:
                             f"max_policy_nodes={max_policy_nodes}"
                         )
                     command = {command_name: action}
-                    grouped: Dict[
-                        Tuple[Tuple[str, object], ...],
-                        Dict[str, object],
-                    ] = {}
+                    expanded_outcomes: List[
+                        Tuple[Dict[str, object], float]
+                    ] = []
                     for state, state_mass in branch_belief:
                         base = step_evidence(state, step)
                         base[f"{command_name}@{step}"] = action
@@ -904,50 +946,132 @@ class CompiledPlanner:
                                     "inconsistent with planner: "
                                     f"{transition_evidence}"
                                 )
-                            for (
-                                observation,
-                                observation_probability,
-                            ) in normalized_observations(
-                                next_state, command
-                            ):
-                                observation_key = frozen_mapping(
-                                    observation,
-                                    label="observation",
-                                )
-                                state_key = frozen_mapping(
+                            expanded_outcomes.append(
+                                (
                                     next_state,
-                                    label="state",
+                                    state_mass * outcome_probability,
                                 )
-                                group = grouped.setdefault(
-                                    observation_key,
-                                    {
-                                        "observation": observation,
-                                        "states": {},
-                                        "mass": 0.0,
-                                    },
-                                )
-                                branch_mass = (
-                                    state_mass
-                                    * outcome_probability
-                                    * observation_probability
-                                )
-                                states = group["states"]
-                                if state_key in states:
-                                    states[state_key][1] += branch_mass
-                                else:
-                                    states[state_key] = [
-                                        next_state,
-                                        branch_mass,
-                                    ]
-                                group["mass"] += branch_mass
+                            )
+
+                    immediate_cost = action_cost(action, command)
+                    if step + 1 == self.horizon:
+                        expected_goal = sum(
+                            probability
+                            * conditional_goal_probability(
+                                step_evidence(
+                                    next_state,
+                                    step + 1,
+                                    include_observables=True,
+                                ),
+                                step + 1,
+                            )
+                            for next_state, probability
+                            in expanded_outcomes
+                        )
+                        candidates.append(
+                            BeliefPolicyNode(
+                                action=command,
+                                immediate_action_cost=immediate_cost,
+                                expected_goal_probability=expected_goal,
+                                expected_action_cost=immediate_cost,
+                                expected_utility=(
+                                    goal_reward * expected_goal
+                                    - cost_weight * immediate_cost
+                                ),
+                                branches=(),
+                                fallback_policy=None,
+                                retained_observation_probability=1.0,
+                                discarded_observation_probability=0.0,
+                            )
+                        )
+                        continue
+
+                    grouped: Dict[
+                        Tuple[Tuple[str, object], ...],
+                        Dict[str, object],
+                    ] = {}
+                    for next_state, outcome_mass in expanded_outcomes:
+                        for (
+                            observation,
+                            observation_probability,
+                        ) in normalized_observations(
+                            next_state, command
+                        ):
+                            observation_key = frozen_mapping(
+                                observation,
+                                label="observation",
+                            )
+                            state_key = frozen_mapping(
+                                next_state,
+                                label="state",
+                            )
+                            group = grouped.setdefault(
+                                observation_key,
+                                {
+                                    "observation": observation,
+                                    "states": {},
+                                    "mass": 0.0,
+                                },
+                            )
+                            branch_mass = (
+                                outcome_mass
+                                * observation_probability
+                            )
+                            states = group["states"]
+                            if state_key in states:
+                                states[state_key][1] += branch_mass
+                            else:
+                                states[state_key] = [
+                                    next_state,
+                                    branch_mass,
+                                ]
+                            group["mass"] += branch_mass
+
+                    groups = sorted(
+                        (
+                            group for group in grouped.values()
+                            if float(group["mass"]) > 0.0
+                        ),
+                        key=lambda group: -float(group["mass"]),
+                    )
+                    counters["generated_observation_branches"] += len(
+                        groups
+                    )
+                    retained_groups = [
+                        group for group in groups
+                        if (
+                            float(group["mass"])
+                            >= min_observation_probability
+                        )
+                    ]
+                    discarded_groups = [
+                        group for group in groups
+                        if (
+                            float(group["mass"])
+                            < min_observation_probability
+                        )
+                    ]
+                    if (
+                        max_observations_per_node is not None
+                        and len(retained_groups)
+                        > max_observations_per_node
+                    ):
+                        discarded_groups.extend(
+                            retained_groups[max_observations_per_node:]
+                        )
+                        retained_groups = retained_groups[
+                            :max_observations_per_node
+                        ]
+                    counters["pruned_observation_branches"] += len(
+                        discarded_groups
+                    )
 
                     branches: List[BeliefPolicyBranch] = []
                     expected_goal = 0.0
                     expected_continuation_cost = 0.0
-                    for group in grouped.values():
-                        probability = float(group["mass"])
-                        if probability <= 0.0:
-                            continue
+                    retained_path_probability = 0.0
+
+                    def account_observation_branch() -> None:
                         counters["observation_branches"] += 1
                         if (
                             counters["observation_branches"]
@@ -958,30 +1082,27 @@ class CompiledPlanner:
                                 f"max_observation_branches="
                                 f"{max_observation_branches}"
                             )
+
+                    for group in retained_groups:
+                        probability = float(group["mass"])
+                        account_observation_branch()
                         posterior = [
                             (state, mass / probability)
                             for state, mass in group["states"].values()
                         ]
-                        if step + 1 < self.horizon:
-                            child, _ = solve_conditional_policy(
-                                posterior, step + 1
-                            )
-                            branch_goal = (
-                                child.expected_goal_probability
-                            )
-                            branch_cost = child.expected_action_cost
-                            branch_utility = child.expected_utility
-                            child_policy: Optional[BeliefPolicyNode] = child
-                        else:
-                            branch_goal = terminal_goal_probability(
-                                posterior, step + 1
-                            )
-                            branch_cost = 0.0
-                            branch_utility = goal_reward * branch_goal
-                            child_policy = None
+                        child, _ = solve_conditional_policy(
+                            posterior, step + 1
+                        )
+                        branch_goal = child.expected_goal_probability
+                        branch_cost = child.expected_action_cost
+                        branch_utility = child.expected_utility
                         expected_goal += probability * branch_goal
                         expected_continuation_cost += (
                             probability * branch_cost
+                        )
+                        retained_path_probability += (
+                            probability
+                            * child.retained_observation_probability
                         )
                         branches.append(
                             BeliefPolicyBranch(
@@ -990,11 +1111,49 @@ class CompiledPlanner:
                                 expected_goal_probability=branch_goal,
                                 expected_action_cost=branch_cost,
                                 expected_utility=branch_utility,
-                                policy=child_policy,
+                                policy=child,
                             )
                         )
 
-                    immediate_cost = action_cost(action, command)
+                    fallback_policy: Optional[BeliefPolicyNode] = None
+                    discarded_probability = sum(
+                        float(group["mass"])
+                        for group in discarded_groups
+                    )
+                    if discarded_probability > 0.0:
+                        account_observation_branch()
+                        fallback_states: Dict[
+                            Tuple[Tuple[str, object], ...],
+                            List[object],
+                        ] = {}
+                        for group in discarded_groups:
+                            for state_key, (
+                                state,
+                                mass,
+                            ) in group["states"].items():
+                                if state_key in fallback_states:
+                                    fallback_states[state_key][1] += mass
+                                else:
+                                    fallback_states[state_key] = [
+                                        state,
+                                        mass,
+                                    ]
+                        fallback_belief = [
+                            (state, mass / discarded_probability)
+                            for state, mass in fallback_states.values()
+                        ]
+                        fallback_policy, _ = solve_conditional_policy(
+                            fallback_belief, step + 1
+                        )
+                        expected_goal += (
+                            discarded_probability
+                            * fallback_policy.expected_goal_probability
+                        )
+                        expected_continuation_cost += (
+                            discarded_probability
+                            * fallback_policy.expected_action_cost
+                        )
+
                     expected_cost = (
                         immediate_cost + expected_continuation_cost
                     )
@@ -1014,14 +1173,21 @@ class CompiledPlanner:
                                     key=lambda branch: -branch.probability,
                                 )
                             ),
+                            fallback_policy=fallback_policy,
+                            retained_observation_probability=(
+                                retained_path_probability
+                            ),
+                            discarded_observation_probability=(
+                                discarded_probability
+                            ),
                         )
                     )
 
                 candidates.sort(
                     key=lambda item: (
-                        -item.expected_utility,
-                        -item.expected_goal_probability,
-                        item.expected_action_cost,
+                        -round(item.expected_utility, 12),
+                        -round(item.expected_goal_probability, 12),
+                        round(item.expected_action_cost, 12),
                     )
                 )
                 return candidates[0], tuple(candidates)
@@ -1037,6 +1203,28 @@ class CompiledPlanner:
                 observation_branch_count=counters[
                     "observation_branches"
                 ],
+                generated_observation_branch_count=counters[
+                    "generated_observation_branches"
+                ],
+                pruned_observation_branch_count=counters[
+                    "pruned_observation_branches"
+                ],
+                retained_observation_probability=(
+                    best_policy.retained_observation_probability
+                ),
+                approximation=(
+                    "observation-pruned"
+                    if counters["pruned_observation_branches"] > 0
+                    else "exact"
+                ),
+                action_ranking=(
+                    "heuristic"
+                    if counters["pruned_observation_branches"] > 0
+                    else "exact"
+                ),
+                utility_is_lower_bound=(
+                    counters["pruned_observation_branches"] > 0
+                ),
             )
 
         if self.horizon > 1:

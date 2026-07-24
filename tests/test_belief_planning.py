@@ -253,6 +253,68 @@ def test_plan_belief_conditional_policy_requires_outcome_model():
         )
 
 
+def test_plan_belief_prunes_rare_observations_into_fallback():
+    planner = repair_planner(horizon=2)
+
+    def observations(state, command):
+        del command
+        if state["mode"] == "goal":
+            return {"signal": "goal"}
+        expected = state["mode"]
+        other = "b" if expected == "a" else "a"
+        return [
+            ({"signal": expected}, 0.99),
+            ({"signal": other}, 0.01),
+        ]
+
+    result = planner.plan_belief(
+        belief=[({"mode": "a"}, 0.5), ({"mode": "b"}, 0.5)],
+        target={"done": True},
+        outcome_model=repair_outcomes,
+        observation_model=observations,
+        action_costs={"none": 0.0, "fix_a": 0.0, "fix_b": 0.2},
+        cost_weight=0.1,
+        min_observation_probability=0.01,
+    )
+
+    assert result.action == {"action": "fix_a"}
+    assert result.approximation == "observation-pruned"
+    assert result.action_ranking == "heuristic"
+    assert result.utility_is_lower_bound
+    assert result.retained_observation_probability == pytest.approx(0.995)
+    assert result.discarded_observation_probability == pytest.approx(0.005)
+    assert result.pruned_observation_branch_count > 0
+    assert result.generated_observation_branch_count >= (
+        result.observation_branch_count
+    )
+    assert result.policy.fallback_policy is not None
+    assert result.policy.continuation(
+        {"signal": "a"}
+    ) is result.policy.fallback_policy
+
+
+def test_plan_belief_skips_observations_after_final_action():
+    calls = []
+
+    def observations(state, command):
+        calls.append((dict(state), dict(command)))
+        return {"mode": state["mode"]}
+
+    result = repair_planner(horizon=2).plan_belief(
+        belief=[({"mode": "a"}, 0.5), ({"mode": "b"}, 0.5)],
+        target={"done": True},
+        outcome_model=repair_outcomes,
+        observation_model=observations,
+    )
+
+    assert result.approximation == "exact"
+    assert result.action_ranking == "exact"
+    assert not result.utility_is_lower_bound
+    assert result.retained_observation_probability == pytest.approx(1.0)
+    assert len(calls) == 6
+    assert all(not branch.policy.branches for branch in result.policy.branches)
+
+
 @pytest.mark.parametrize(
     "belief",
     [
