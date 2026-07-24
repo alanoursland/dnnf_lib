@@ -18,6 +18,11 @@ Notable user-facing changes are recorded here for inclusion in release notes.
 - **GAP-003 — sensor-probability validation:** `false_positive` and
   `false_negative` now reject non-finite values and values outside the closed
   interval `[0, 1]`, with errors naming the sensor and parameter.
+- **GAP-007 — static planner modes:** planner modes without explicit
+  transition rules now persist automatically across the planning horizon.
+  Static persistence is lowered directly without creating an invalid
+  one-value transition selector, and detailed planner results report the
+  implicit transition as a zero-cost noop.
 
 ### Added
 
@@ -51,7 +56,7 @@ Notable user-facing changes are recorded here for inclusion in release notes.
 
 ### Verification
 
-- ModeNexus test suite: **294 passed, 7 skipped**.
+- ModeNexus test suite: **295 passed, 7 skipped**.
 - Black-box API edge-case checks: all fixed cases report `OK`.
 - Companion applications: all eight non-PyTorch tests passed. The optional
   PyTorch verification was not run because PyTorch was unavailable in the

@@ -102,7 +102,8 @@ class Planner:
         priors: Optional[Sequence[float]] = None,
     ) -> None:
         """A state variable; ``priors`` (if given) weight step 0 —
-        the initial-mode likelihood used by estimation."""
+        the initial-mode likelihood used by estimation.  A mode with no
+        declared transition rules is static and persists across every step."""
         values = tuple(values)
         if priors is not None:
             priors = tuple(_normalize_categorical_weights(name, values, priors))
@@ -170,13 +171,20 @@ class Planner:
         for t in range(horizon):
             for name, (values, _) in self._modes.items():
                 trans = [tr for tr in self._transitions if tr.mode == name]
+                cur, nxt = step_vars[t][name], step_vars[t + 1][name]
+                if not trans:
+                    # A mode with no transition rules is static.  Lower
+                    # persistence directly instead of creating a one-value
+                    # selector, which is not a valid finite-domain variable.
+                    for value in values:
+                        m.add((cur != value) | (nxt == value))
+                    continue
                 labels = ["noop"] + [f"t{i}" for i in range(len(trans))]
                 tv = m.finite(f"_{name}@{t}#trans", labels)
                 for i, tr in enumerate(trans):
                     w = math.exp(-tr.cost)
                     if w != 1.0:
                         m._prior_weights[spec.mvlit(tv.fd_var, i + 1)] = w
-                cur, nxt = step_vars[t][name], step_vars[t + 1][name]
                 for v in values:  # noop: mode persists
                     m.add((tv == "noop") >> ((cur != v) | (nxt == v)))
                 for i, tr in enumerate(trans):
@@ -262,7 +270,25 @@ class CompiledPlanner:
         }
         for step in range(self.horizon):
             for name in self.mode_names:
-                selector = self.system.vars[f"_{name}@{step}#trans"]
+                selector_name = f"_{name}@{step}#trans"
+                if selector_name not in self.system.vars:
+                    current = self._decode(assignment, [name], step)[name]
+                    following = self._decode(
+                        assignment, [name], step + 1
+                    )[name]
+                    selected.append(
+                        TransitionCost(
+                            step,
+                            name,
+                            "noop",
+                            current,
+                            following,
+                            None,
+                            0.0,
+                        )
+                    )
+                    continue
+                selector = self.system.vars[selector_name]
                 selected_index = assignment[selector.fd_var]
                 label = selector.values[selected_index]
                 contribution = self.system._costs[

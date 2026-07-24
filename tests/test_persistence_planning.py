@@ -114,3 +114,37 @@ def test_planner_mode_priors_validate_at_declaration():
     p = Planner()
     with pytest.raises(ValueError, match="m.*priors"):
         p.mode("m", ("A", "B"), priors=(1.0, -0.1))
+
+
+def test_mode_without_transition_rules_is_static():
+    p = Planner()
+    p.mode("repairable", ("ok", "bad"), priors=(0.9, 0.1))
+    p.mode("static", ("ok", "bad"), priors=(0.9, 0.1))
+    p.command("action", ("none", "repair"))
+    p.transition(
+        "repairable",
+        "bad",
+        "ok",
+        command=("action", "repair"),
+        cost=0.5,
+    )
+    compiled = p.compile(horizon=1)
+
+    result = compiled.plan_detailed(
+        current={"repairable": "bad", "static": "ok"},
+        target={"repairable": "ok", "static": "ok"},
+    )
+    assert result is not None
+    assert result.commands == [{"action": "repair"}]
+    assert [state["static"] for state in result.trajectory] == ["ok", "ok"]
+    static_step = next(
+        item for item in result.costs.transition_costs
+        if item.mode == "static"
+    )
+    assert static_step.transition == "noop"
+    assert static_step.cost == 0.0
+
+    assert compiled.plan(
+        current={"repairable": "bad", "static": "ok"},
+        target={"repairable": "ok", "static": "bad"},
+    ) is None
