@@ -51,6 +51,8 @@ from .kbest import enumerate_map, enumerate_models
 from .planning import (
     BeliefActionEvaluation,
     BeliefPlanResult,
+    BeliefPolicyResult,
+    BeliefSequenceEvaluation,
     EstimateResult,
     PlanResult,
     Planner,
@@ -94,6 +96,8 @@ __all__ = [
     "Planner",
     "BeliefActionEvaluation",
     "BeliefPlanResult",
+    "BeliefPolicyResult",
+    "BeliefSequenceEvaluation",
     "PlanResult",
     "EstimateResult",
     "PlannerCostBreakdown",

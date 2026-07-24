@@ -118,11 +118,52 @@ def test_plan_belief_uses_compiled_transition_weights_by_default():
     assert result.expected_goal_probability == pytest.approx(0.2)
 
 
-def test_plan_belief_rejects_multistep_open_loop_semantics():
-    with pytest.raises(NotImplementedError, match="conditional policy"):
-        repair_planner(horizon=2).plan_belief(
+def test_plan_belief_selects_multistep_prerequisite_sequence():
+    planner = Planner()
+    planner.mode("mode", ("start", "ready", "goal"), priors=(1, 1, 1))
+    planner.command("action", ("none", "prepare", "finish"))
+    planner.observable("done")
+    planner.behavior(
+        lambda value: iff(value["done"] == True, value["mode"] == "goal")
+    )
+    planner.transition(
+        "mode", "start", "ready", command=("action", "prepare")
+    )
+    planner.transition(
+        "mode", "ready", "goal", command=("action", "finish")
+    )
+
+    def outcomes(state, command):
+        if state["mode"] == "start" and command["action"] == "prepare":
+            return [({"mode": "ready"}, 1.0)]
+        if state["mode"] == "ready" and command["action"] == "finish":
+            return [({"mode": "goal"}, 1.0)]
+        return [({}, 1.0)]
+
+    result = planner.compile(horizon=2).plan_belief(
+        belief=[({"mode": "start"}, 1.0)],
+        target={"done": True},
+        outcome_model=outcomes,
+        action_costs={"none": 0.0, "prepare": 0.1, "finish": 0.1},
+        cost_weight=0.1,
+    )
+    assert [command["action"] for command in result.commands] == [
+        "prepare",
+        "finish",
+    ]
+    assert result.action == {"action": "prepare"}
+    assert result.expected_goal_probability == pytest.approx(1.0)
+    assert result.expected_utility == pytest.approx(0.98)
+    assert len(result.evaluations) == 9
+    assert not result.observation_branching
+
+
+def test_plan_belief_multistep_has_explicit_sequence_budget():
+    with pytest.raises(ValueError, match="action sequences"):
+        repair_planner(horizon=3).plan_belief(
             belief=[({"mode": "a"}, 1.0)],
             target={"done": True},
+            max_action_sequences=10,
         )
 
 

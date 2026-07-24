@@ -49,8 +49,15 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   `ModeTracker.belief()`, supports explicit stochastic outcome models,
   separates action costs from physical outcome probabilities, validates and
   normalizes belief/outcome masses, and returns every action evaluation.
-  Multi-step calls fail explicitly because that capability requires a
-  conditional policy rather than an open-loop command sequence.
+  The original `BeliefPlanResult` remains the horizon-one result type.
+- **GAP-009 — multi-step belief lookahead:** `plan_belief()` now supports
+  planners compiled with horizons greater than one. It enumerates bounded
+  command sequences, propagates explicit stochastic outcome branches,
+  accumulates action costs, and maximizes terminal expected utility. New
+  `BeliefPolicyResult` and `BeliefSequenceEvaluation` types expose the best
+  sequence, every alternative, per-step goal probabilities, and the explicit
+  `observation_branching=False` limitation. Sequence and outcome-branch
+  budgets fail early with the required resource count.
 
 ### Documentation and examples
 
@@ -61,12 +68,14 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   manually calculating beam capacity.
 - Updated the microgrid belief-control experiment to use `plan_belief`
   instead of its application-local expected-utility loop.
+- Updated the microgrid receding-horizon controller and policy trial to use
+  two-step belief lookahead for prerequisite recovery actions.
 - Updated the black-box edge-case experiment and archived GAP-001 through
-  GAP-008 under `modenexus_apps/gaps/fixed`.
+  GAP-009 under `modenexus_apps/gaps/fixed`.
 
 ### Verification
 
-- ModeNexus test suite: **303 passed, 7 skipped**.
+- ModeNexus test suite: **304 passed, 7 skipped**.
 - Black-box API edge-case checks: all fixed cases report `OK`.
 - Companion applications: all eight non-PyTorch tests passed. The optional
   PyTorch verification was not run because PyTorch was unavailable in the

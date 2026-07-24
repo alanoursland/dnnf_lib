@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from itertools import product
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import fd
@@ -111,6 +112,40 @@ class BeliefPlanResult:
     def commands(self) -> List[Dict[str, object]]:
         """Single-command list for symmetry with :class:`PlanResult`."""
         return [dict(self.action)]
+
+
+@dataclass(frozen=True)
+class BeliefSequenceEvaluation:
+    """Expected terminal value of one open-loop command sequence."""
+
+    commands: Tuple[Dict[str, object], ...]
+    expected_goal_probability: float
+    action_cost: float
+    expected_utility: float
+    expected_goal_probabilities: Tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class BeliefPolicyResult:
+    """Best bounded-lookahead sequence under a joint initial belief.
+
+    ``observation_branching`` is false for this initial multi-step surface:
+    stochastic outcomes are integrated exactly, but future commands do not
+    branch on observations.
+    """
+
+    commands: Tuple[Dict[str, object], ...]
+    expected_goal_probability: float
+    action_cost: float
+    expected_utility: float
+    expected_goal_probabilities: Tuple[float, ...]
+    evaluations: Tuple[BeliefSequenceEvaluation, ...]
+    observation_branching: bool = False
+
+    @property
+    def action(self) -> Dict[str, object]:
+        """First action, suitable for receding-horizon execution."""
+        return dict(self.commands[0])
 
 
 class Planner:
@@ -420,13 +455,17 @@ class CompiledPlanner:
         actions: Optional[Sequence[object]] = None,
         goal_reward: float = 1.0,
         cost_weight: float = 1.0,
-    ) -> BeliefPlanResult:
+        max_action_sequences: int = 100_000,
+        max_outcome_branches: int = 100_000,
+    ) -> BeliefPlanResult | BeliefPolicyResult:
         """Choose one action by exact expectation over a correlated belief.
 
-        This bounded belief-planning surface intentionally supports only a
-        planner compiled with ``horizon=1`` and one command variable.
-        Multi-step planning under uncertainty requires a conditional policy,
-        not the open-loop command sequence returned by :meth:`plan`.
+        With ``horizon=1`` this returns :class:`BeliefPlanResult`.  Longer
+        horizons perform bounded open-loop lookahead and return
+        :class:`BeliefPolicyResult`: stochastic outcomes are integrated
+        exactly, but the selected future commands do not branch on future
+        observations.  Execute its first ``action`` and replan after the next
+        observation for receding-horizon control.
 
         ``belief`` has the shape returned by
         :meth:`modenexus.ModeTracker.belief`: ``[(joint_state, mass), ...]``.
@@ -445,13 +484,10 @@ class CompiledPlanner:
         Utility is ``goal_reward * P(target) - cost_weight * action_cost``.
         For a single command variable, ``action_costs`` is either a mapping
         from command values to costs or a callable receiving the command
-        dictionary.  Evaluations are returned best-first.
+        dictionary.  Evaluations are returned best-first.  The explicit
+        sequence and outcome-branch limits make exponential lookahead
+        inspectable and provisionable.
         """
-        if self.horizon != 1:
-            raise NotImplementedError(
-                "plan_belief currently supports horizon=1; multi-step "
-                "belief planning requires a conditional policy"
-            )
         if len(self.command_names) != 1:
             raise NotImplementedError(
                 "plan_belief currently supports exactly one command variable"
@@ -460,6 +496,10 @@ class CompiledPlanner:
             raise ValueError("goal_reward must be finite and non-negative")
         if not math.isfinite(cost_weight) or cost_weight < 0.0:
             raise ValueError("cost_weight must be finite and non-negative")
+        if max_action_sequences < 1:
+            raise ValueError("max_action_sequences must be at least 1")
+        if max_outcome_branches < 1:
+            raise ValueError("max_outcome_branches must be at least 1")
         if not target:
             raise ValueError("target must not be empty")
         valid_targets = set(self.mode_names) | set(self.obs_names)
@@ -512,10 +552,6 @@ class CompiledPlanner:
         for action in action_values:
             command_var._index(action)
 
-        target_evidence = {
-            f"{name}@1": value for name, value in target.items()
-        }
-
         def step_evidence(
             state: Mapping[str, object],
             step: int,
@@ -532,8 +568,11 @@ class CompiledPlanner:
             }
 
         def conditional_goal_probability(
-            evidence: Dict[str, object]
+            evidence: Dict[str, object],
+            target_step: Optional[int] = None,
         ) -> float:
+            if target_step is None:
+                target_step = self.horizon
             log_denominator = self.system.log_evidence(evidence)
             if log_denominator == -math.inf:
                 raise ValueError(
@@ -541,7 +580,12 @@ class CompiledPlanner:
                     f"{evidence}"
                 )
             with_goal = dict(evidence)
-            with_goal.update(target_evidence)
+            with_goal.update(
+                {
+                    f"{name}@{target_step}": value
+                    for name, value in target.items()
+                }
+            )
             log_numerator = self.system.log_evidence(with_goal)
             if log_numerator == -math.inf:
                 return 0.0
@@ -569,6 +613,185 @@ class CompiledPlanner:
                     f"non-negative; got {value!r}"
                 )
             return numeric
+
+        def normalized_outcomes(
+            state: Dict[str, object], command: Dict[str, object]
+        ) -> List[Tuple[Dict[str, object], float]]:
+            if outcome_model is None:
+                raise RuntimeError("normalized_outcomes needs outcome_model")
+            outcomes = list(outcome_model(dict(state), dict(command)))
+            if not outcomes:
+                raise ValueError(
+                    f"outcome_model returned no outcomes for "
+                    f"state={state}, action={command}"
+                )
+            checked = []
+            total = 0.0
+            for outcome, probability in outcomes:
+                try:
+                    numeric_probability = float(probability)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        "outcome probabilities must be finite and "
+                        f"non-negative; got {probability!r}"
+                    ) from None
+                if (
+                    not math.isfinite(numeric_probability)
+                    or numeric_probability < 0.0
+                ):
+                    raise ValueError(
+                        "outcome probabilities must be finite and "
+                        f"non-negative; got {probability!r}"
+                    )
+                checked.append((dict(outcome), numeric_probability))
+                total += numeric_probability
+            if not math.isfinite(total) or total <= 0:
+                raise ValueError(
+                    "outcome probabilities must have positive finite "
+                    "total mass"
+                )
+            return [
+                (outcome, probability / total)
+                for outcome, probability in checked
+                if probability > 0.0
+            ]
+
+        if self.horizon > 1:
+            sequence_count = len(action_values) ** self.horizon
+            if sequence_count > max_action_sequences:
+                raise ValueError(
+                    f"belief lookahead requires {sequence_count} action "
+                    f"sequences, exceeding "
+                    f"max_action_sequences={max_action_sequences}"
+                )
+            sequence_evaluations: List[BeliefSequenceEvaluation] = []
+            for action_sequence in product(
+                action_values, repeat=self.horizon
+            ):
+                commands = tuple(
+                    {command_name: action} for action in action_sequence
+                )
+                total_cost = sum(
+                    action_cost(action, command)
+                    for action, command in zip(action_sequence, commands)
+                )
+                if outcome_model is None:
+                    expected_by_step = [0.0] * self.horizon
+                    for state, state_mass in checked_states:
+                        evidence = step_evidence(state, 0)
+                        for step, action in enumerate(action_sequence):
+                            evidence[f"{command_name}@{step}"] = action
+                            expected_by_step[step] += (
+                                state_mass
+                                * conditional_goal_probability(
+                                    evidence, step + 1
+                                )
+                            )
+                else:
+                    # Branches retain path evidence so outcomes are checked
+                    # against the compiled transition relation at every step.
+                    branches = [
+                        (dict(state), mass, step_evidence(state, 0))
+                        for state, mass in checked_states
+                        if mass > 0.0
+                    ]
+                    expected_by_step = []
+                    for step, command in enumerate(commands):
+                        expanded = []
+                        for state, branch_mass, path_evidence in branches:
+                            base = dict(path_evidence)
+                            base[f"{command_name}@{step}"] = command[
+                                command_name
+                            ]
+                            for updates, probability in normalized_outcomes(
+                                state, command
+                            ):
+                                next_state = dict(state)
+                                next_state.update(updates)
+                                outcome_evidence = dict(base)
+                                outcome_evidence.update(
+                                    step_evidence(
+                                        next_state,
+                                        step + 1,
+                                    )
+                                )
+                                outcome_evidence.update(
+                                    {
+                                        f"{name}@{step + 1}": value
+                                        for name, value in updates.items()
+                                        if name in self.obs_names
+                                    }
+                                )
+                                # Validate the supplied physical outcome
+                                # against the planner's hard model now,
+                                # before terminal utility is evaluated.
+                                if (
+                                    self.system.log_evidence(outcome_evidence)
+                                    == -math.inf
+                                ):
+                                    raise ValueError(
+                                        "outcome_model produced a state "
+                                        "inconsistent with planner: "
+                                        f"{outcome_evidence}"
+                                    )
+                                expanded.append(
+                                    (
+                                        next_state,
+                                        branch_mass * probability,
+                                        outcome_evidence,
+                                    )
+                                )
+                                if len(expanded) > max_outcome_branches:
+                                    raise ValueError(
+                                        "belief lookahead exceeded "
+                                        f"max_outcome_branches="
+                                        f"{max_outcome_branches}"
+                                    )
+                        branches = expanded
+                        expected_by_step.append(
+                            sum(
+                                branch_mass
+                                * conditional_goal_probability(
+                                    path_evidence, step + 1
+                                )
+                                for _, branch_mass, path_evidence in branches
+                            )
+                        )
+                expected_goal = expected_by_step[-1]
+                utility = (
+                    goal_reward * expected_goal
+                    - cost_weight * total_cost
+                )
+                sequence_evaluations.append(
+                    BeliefSequenceEvaluation(
+                        commands=commands,
+                        expected_goal_probability=expected_goal,
+                        action_cost=total_cost,
+                        expected_utility=utility,
+                        expected_goal_probabilities=tuple(expected_by_step),
+                    )
+                )
+            sequence_evaluations.sort(
+                key=lambda item: (
+                    -item.expected_utility,
+                    -sum(item.expected_goal_probabilities),
+                )
+            )
+            best_sequence = sequence_evaluations[0]
+            return BeliefPolicyResult(
+                commands=tuple(
+                    dict(command) for command in best_sequence.commands
+                ),
+                expected_goal_probability=(
+                    best_sequence.expected_goal_probability
+                ),
+                action_cost=best_sequence.action_cost,
+                expected_utility=best_sequence.expected_utility,
+                expected_goal_probabilities=(
+                    best_sequence.expected_goal_probabilities
+                ),
+                evaluations=tuple(sequence_evaluations),
+            )
 
         evaluations: List[BeliefActionEvaluation] = []
         for action in action_values:

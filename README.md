@@ -157,8 +157,12 @@ For one-step decisions under uncertainty, `plan_belief()` accepts the
 correlated joint distribution returned by `ModeTracker.belief()` and ranks
 actions by exact expected goal probability or expected utility. Applications
 may supply stochastic action outcomes and separate operational costs.
-Multi-step belief planning is deliberately not represented as an open-loop
-plan: it requires a future conditional-policy API.
+On planners compiled with a longer horizon, it performs bounded lookahead
+over command sequences, propagates stochastic outcome branches, and returns
+the best `BeliefPolicyResult`; sequence and branch budgets make the
+exponential work explicit. This first multi-step surface has
+`observation_branching=False`: execute its first action and replan after new
+evidence. Observation-contingent policy trees remain a future extension.
 
 ## GPU / batched evaluation (PyTorch)
 
