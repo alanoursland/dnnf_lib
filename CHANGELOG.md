@@ -93,6 +93,15 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   Unknown tracker mass receives conservative missing-state bounds, preventing
   a certificate valid only for a normalized beam from being presented as an
   exact-posterior guarantee.
+- **GAP-014 — adaptive tracker refinement:** `ModeTracker` can now retain
+  successful evidence and per-step transition overrides on request.
+  `refine()` reconstructs a fresh larger tracker by replaying that history,
+  while `from_history()` supports explicit checkpoints. `refine_until()`
+  evaluates a downstream predicate over successively larger beliefs and
+  returns every attempt with its beam, expansion width, replayed steps,
+  generated candidates, replay/evaluation time, retained mass, certificate
+  scope, and regret.
+  Exact fallback remains deliberate and respects `max_exact_states`.
 
 ### Documentation and examples
 
@@ -113,13 +122,16 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   regret with the public worst-case regret certificate.
 - Updated the tracker-certificate experiment to distinguish policy-only and
   end-to-end root-action guarantees.
+- Updated the microgrid controller and tracker-refinement experiment to
+  retain history, replay an uncertified beam at explicit exact capacity, and
+  expose the resulting computational work and certificate transition.
 - Updated the black-box edge-case experiment and archived GAP-001 through
-  GAP-013 under `modenexus_apps/gaps/fixed`.
+  GAP-014 under `modenexus_apps/gaps/fixed`.
 
 ### Verification
 
-- ModeNexus test suite: **309 passed, 7 skipped**.
+- ModeNexus test suite: **312 passed, 7 skipped**.
 - Black-box API edge-case checks: all fixed cases report `OK`.
-- Companion applications: all **39 non-PyTorch tests passed**. The optional
+- Companion applications: all **40 non-PyTorch tests passed**. The optional
   PyTorch verification was not run because PyTorch was unavailable in the
   verification environment.

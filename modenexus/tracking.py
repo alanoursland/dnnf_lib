@@ -31,8 +31,10 @@ outside the beam is dropped (renormalized away).
 from __future__ import annotations
 
 import math
+import time
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .diagnosis import CompiledSystem, EvidenceValue
 
@@ -77,6 +79,75 @@ class TrackingStepInfo:
     exact: bool
 
 
+@dataclass(frozen=True)
+class TrackingHistoryStep:
+    """One replayable filtering input retained by :class:`ModeTracker`."""
+
+    evidence: Dict[str, EvidenceValue]
+    transitions: Optional[Transitions]
+
+
+@dataclass(frozen=True)
+class TrackingReplayInfo:
+    """Work performed while rebuilding a tracker at higher resources."""
+
+    source_beam: int
+    source_expand: int
+    target_beam: int
+    target_expand: int
+    steps_replayed: int
+    generated_candidates: int
+    replay_seconds: float
+    exact: bool
+    retained_probability_mass: Optional[float]
+
+
+@dataclass(frozen=True)
+class TrackingRefinementAttempt:
+    """One downstream evaluation in an adaptive refinement run."""
+
+    beam: int
+    expand: int
+    steps_replayed: int
+    generated_candidates: int
+    replay_seconds: float
+    evaluation_seconds: float
+    exact: bool
+    retained_probability_mass: Optional[float]
+    accepted: bool
+    certificate_scope: Optional[str]
+    maximum_regret: Optional[float]
+    evaluation: Any
+
+
+@dataclass(frozen=True)
+class TrackingRefinementResult:
+    """Final tracker, evaluation, and measured adaptive-refinement work."""
+
+    tracker: "ModeTracker"
+    evaluation: Any
+    accepted: bool
+    attempts: Tuple[TrackingRefinementAttempt, ...]
+
+    @property
+    def total_steps_replayed(self) -> int:
+        return sum(attempt.steps_replayed for attempt in self.attempts)
+
+    @property
+    def total_generated_candidates(self) -> int:
+        return sum(
+            attempt.generated_candidates for attempt in self.attempts
+        )
+
+    @property
+    def total_replay_seconds(self) -> float:
+        return sum(attempt.replay_seconds for attempt in self.attempts)
+
+    @property
+    def total_evaluation_seconds(self) -> float:
+        return sum(attempt.evaluation_seconds for attempt in self.attempts)
+
+
 def _logsumexp(values: List[float]) -> float:
     m = max(values)
     if m == -math.inf:
@@ -116,6 +187,10 @@ class ModeTracker:
     max_exact_states:
         Safety limit for ``exact=True``.  Raise it deliberately when the
         computed state-space size is acceptable for the deployment.
+    retain_history:
+        Retain successful step evidence and per-step transition overrides so
+        :meth:`refine` can rebuild the posterior with a larger beam. History
+        retention is opt-in because evidence volume can grow without bound.
 
     ``belief()`` returns a list-compatible :class:`TrackedBelief` carrying
     exactness and retained-mass metadata for downstream certificate
@@ -134,6 +209,7 @@ class ModeTracker:
         transition_fn=None,
         exact: bool = False,
         max_exact_states: int = 100_000,
+        retain_history: bool = False,
     ):
         self.system = system
         self.joint_state_count = math.prod(
@@ -177,7 +253,10 @@ class ModeTracker:
                     raise ValueError(
                         f"transition row {name}[{from_value}] sums to {total}"
                     )
-        self.transitions = transitions
+        self.transitions = deepcopy(transitions)
+        self.retain_history = bool(retain_history)
+        self._history: List[TrackingHistoryStep] = []
+        self.last_replay_info: Optional[TrackingReplayInfo] = None
         # Belief: {mode assignment: log mass}, unnormalized.
         self._belief: Dict[ModeAssignment, float] = {}
         self._belief_exact = False
@@ -297,6 +376,13 @@ class ModeTracker:
             retained_probability_mass=retained_probability_mass,
             exact=self._belief_exact,
         )
+        if self.retain_history:
+            self._history.append(
+                TrackingHistoryStep(
+                    evidence=deepcopy(evidence),
+                    transitions=deepcopy(transitions),
+                )
+            )
         return self.belief()
 
     # ------------------------------------------------------------------
@@ -323,3 +409,269 @@ class ModeTracker:
 
     def most_probable(self) -> Tuple[Dict[str, str], float]:
         return self.belief()[0]
+
+    @property
+    def history(self) -> Tuple[TrackingHistoryStep, ...]:
+        """A defensive copy of retained successful filtering inputs."""
+        return tuple(deepcopy(self._history))
+
+    @classmethod
+    def from_history(
+        cls,
+        system: CompiledSystem,
+        history: Sequence[TrackingHistoryStep],
+        transitions: Optional[Transitions] = None,
+        *,
+        beam: Optional[int] = None,
+        expand: Optional[int] = None,
+        transition_fn=None,
+        exact: bool = False,
+        max_exact_states: int = 100_000,
+        retain_history: bool = True,
+    ) -> "ModeTracker":
+        """Build a tracker and replay an explicit retained history.
+
+        Only successful steps belong in ``history``. The replay uses the
+        supplied base transitions and transition function, plus the
+        per-step overrides captured in each :class:`TrackingHistoryStep`.
+        A stateful ``transition_fn`` must itself be replay-safe.
+        """
+        tracker = cls(
+            system,
+            transitions=deepcopy(transitions),
+            beam=beam,
+            expand=expand,
+            transition_fn=transition_fn,
+            exact=exact,
+            max_exact_states=max_exact_states,
+            retain_history=retain_history,
+        )
+        generated_candidates = 0
+        replay_started = time.perf_counter()
+        for entry in history:
+            if not isinstance(entry, TrackingHistoryStep):
+                raise TypeError(
+                    "history entries must be TrackingHistoryStep instances"
+                )
+            tracker.step(
+                deepcopy(entry.evidence),
+                transitions=deepcopy(entry.transitions),
+            )
+            generated_candidates += tracker.last_step_info.generated_candidates
+        replay_seconds = time.perf_counter() - replay_started
+        tracker.last_replay_info = TrackingReplayInfo(
+            source_beam=tracker.beam,
+            source_expand=tracker.expand,
+            target_beam=tracker.beam,
+            target_expand=tracker.expand,
+            steps_replayed=len(history),
+            generated_candidates=generated_candidates,
+            replay_seconds=replay_seconds,
+            exact=tracker.belief().exact,
+            retained_probability_mass=(
+                tracker.belief().retained_probability_mass
+            ),
+        )
+        return tracker
+
+    def refine(
+        self,
+        *,
+        beam: Optional[int] = None,
+        expand: Optional[int] = None,
+        exact: bool = False,
+        max_exact_states: int = 100_000,
+    ) -> "ModeTracker":
+        """Return a freshly replayed tracker with greater resources.
+
+        Refinement never mutates this tracker and never pretends discarded
+        trajectories can be recovered in place. For a tracker that has
+        advanced, ``retain_history=True`` must have been selected at
+        construction. With no explicit target, both resources double up to
+        the complete joint state count.
+        """
+        if self.t and not self.retain_history:
+            raise RuntimeError(
+                "tracker refinement requires retain_history=True before "
+                "filtering steps are recorded"
+            )
+        if len(self._history) != self.t:
+            raise RuntimeError("retained tracker history is incomplete")
+
+        if exact:
+            target_beam = self.joint_state_count
+            target_expand = self.joint_state_count
+        else:
+            target_beam = (
+                min(
+                    self.joint_state_count,
+                    max(self.beam + 1, self.beam * 2),
+                )
+                if beam is None
+                else beam
+            )
+            target_expand = (
+                max(self.expand, target_beam)
+                if expand is None
+                else expand
+            )
+            if target_beam < self.beam or target_expand < self.expand:
+                raise ValueError(
+                    "refinement resources cannot be smaller than the "
+                    "current beam and expand"
+                )
+            if (
+                target_beam == self.beam
+                and target_expand == self.expand
+            ):
+                raise ValueError(
+                    "refinement must increase beam or expand"
+                )
+
+        refined = type(self).from_history(
+            self.system,
+            self._history,
+            transitions=self.transitions,
+            beam=None if exact else target_beam,
+            expand=None if exact else target_expand,
+            transition_fn=self.transition_fn,
+            exact=exact,
+            max_exact_states=max_exact_states,
+            retain_history=True,
+        )
+        replay = refined.last_replay_info
+        refined.last_replay_info = TrackingReplayInfo(
+            source_beam=self.beam,
+            source_expand=self.expand,
+            target_beam=refined.beam,
+            target_expand=refined.expand,
+            steps_replayed=replay.steps_replayed,
+            generated_candidates=replay.generated_candidates,
+            replay_seconds=replay.replay_seconds,
+            exact=replay.exact,
+            retained_probability_mass=replay.retained_probability_mass,
+        )
+        return refined
+
+    def refine_until(
+        self,
+        evaluate: Callable[[TrackedBelief], Any],
+        accept: Callable[[Any], bool],
+        *,
+        beams: Optional[Sequence[int]] = None,
+        max_beam: Optional[int] = None,
+        growth_factor: float = 2.0,
+        exact_fallback: bool = True,
+        max_exact_states: int = 100_000,
+    ) -> TrackingRefinementResult:
+        """Replay at increasing resources until ``accept(evaluate(...))``.
+
+        The current belief is evaluated first without replay. By default,
+        the beam grows geometrically and the last permitted attempt is exact.
+        Explicit ``beams`` make the resource schedule fully deterministic.
+        The returned attempts expose replay work and, when the evaluation
+        provides them, ``certificate_scope`` and ``maximum_regret``.
+        """
+        if growth_factor <= 1.0:
+            raise ValueError("growth_factor must be greater than 1")
+        limit = self.joint_state_count if max_beam is None else max_beam
+        if limit < self.beam:
+            raise ValueError("max_beam cannot be smaller than current beam")
+
+        if beams is None:
+            targets = []
+            candidate = self.beam
+            while candidate < min(limit, self.joint_state_count):
+                candidate = min(
+                    min(limit, self.joint_state_count),
+                    max(candidate + 1, math.ceil(candidate * growth_factor)),
+                )
+                targets.append(candidate)
+        else:
+            targets = list(beams)
+            if any(target <= self.beam for target in targets):
+                raise ValueError(
+                    "refinement beams must be greater than current beam"
+                )
+            if any(
+                right <= left
+                for left, right in zip(targets, targets[1:])
+            ):
+                raise ValueError(
+                    "refinement beams must be strictly increasing"
+                )
+            if any(target > limit for target in targets):
+                raise ValueError("refinement beam exceeds max_beam")
+
+        if (
+            exact_fallback
+            and limit >= self.joint_state_count
+            and self.joint_state_count > self.beam
+            and self.joint_state_count not in targets
+        ):
+            targets.append(self.joint_state_count)
+
+        attempts = []
+        current = self
+        evaluation_started = time.perf_counter()
+        evaluation = evaluate(current.belief())
+        evaluation_seconds = time.perf_counter() - evaluation_started
+
+        def record(
+            tracker: "ModeTracker",
+            result: Any,
+            accepted: bool,
+            result_seconds: float,
+        ) -> TrackingRefinementAttempt:
+            replay = tracker.last_replay_info
+            belief = tracker.belief()
+            return TrackingRefinementAttempt(
+                beam=tracker.beam,
+                expand=tracker.expand,
+                steps_replayed=0 if replay is None else replay.steps_replayed,
+                generated_candidates=(
+                    0 if replay is None else replay.generated_candidates
+                ),
+                replay_seconds=(
+                    0.0 if replay is None else replay.replay_seconds
+                ),
+                evaluation_seconds=result_seconds,
+                exact=belief.exact,
+                retained_probability_mass=(
+                    belief.retained_probability_mass
+                ),
+                accepted=accepted,
+                certificate_scope=getattr(
+                    result, "certificate_scope", None
+                ),
+                maximum_regret=getattr(result, "maximum_regret", None),
+                evaluation=result,
+            )
+
+        accepted = bool(accept(evaluation))
+        attempts.append(
+            record(current, evaluation, accepted, evaluation_seconds)
+        )
+        for target in targets:
+            if accepted:
+                break
+            current = self.refine(
+                beam=target,
+                expand=target,
+                exact=target >= self.joint_state_count,
+                max_exact_states=max_exact_states,
+            )
+            evaluation_started = time.perf_counter()
+            evaluation = evaluate(current.belief())
+            evaluation_seconds = time.perf_counter() - evaluation_started
+            accepted = bool(accept(evaluation))
+            attempts.append(
+                record(current, evaluation, accepted, evaluation_seconds)
+            )
+
+        return TrackingRefinementResult(
+            tracker=current,
+            evaluation=evaluation,
+            accepted=accepted,
+            attempts=tuple(attempts),
+        )

@@ -144,6 +144,18 @@ expansion/beam truncation and retained-mass diagnostics.
 `ModeTracker.belief()` returns a list-compatible `TrackedBelief` carrying
 exactness and retained-mass metadata, so downstream planners can distinguish
 an exact posterior from a normalized truncated beam.
+For adaptive deployments, construct the tracker with
+`retain_history=True`. `tracker.refine(beam=..., expand=...)` returns a
+fresh tracker rebuilt from the original prior and all retained evidence and
+per-step transition overrides; it does not mutate a truncated belief or
+pretend discarded trajectories can be recovered in place.
+`tracker.refine_until(evaluate, accept, ...)` evaluates the current belief,
+replays at an explicit or geometrically increasing resource schedule, and
+stops when the caller's certificate or regret predicate succeeds. Its result
+records every attempted beam, replayed-step and generated-candidate counts,
+replay and evaluation time, retained mass, and any downstream
+`certificate_scope` and `maximum_regret`.
+The default final attempt is exact, subject to `max_exact_states`.
 
 Beyond ranked diagnoses: `value_of_information` scores which sensor to
 read next (expected entropy reduction, in nats),

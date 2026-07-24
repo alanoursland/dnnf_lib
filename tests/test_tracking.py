@@ -10,6 +10,7 @@ reproduce the exact forward algorithm.
 """
 
 import math
+from types import SimpleNamespace
 
 import pytest
 
@@ -183,3 +184,84 @@ def test_step_info_reports_approximation():
     belief = tracker.belief()
     assert not belief.exact
     assert belief.retained_probability_mass is None
+
+
+def test_refine_replays_retained_history_without_mutating_source():
+    tracker = ModeTracker(
+        build_system(),
+        beam=1,
+        expand=1,
+        retain_history=True,
+    )
+    first = {"alarm": False}
+    tracker.step(first, transitions=TRANS)
+    first["alarm"] = True
+    tracker.step({"alarm": True}, transitions=TRANS)
+
+    refined = tracker.refine(exact=True)
+    expected = exact_forward([False, True])
+
+    assert tracker.beam == 1
+    assert not tracker.belief().exact
+    assert tracker.history[0].evidence == {"alarm": False}
+    assert refined.beam == 2
+    assert refined.belief().exact
+    assert refined.last_replay_info.steps_replayed == 2
+    assert refined.last_replay_info.generated_candidates > 0
+    assert refined.last_replay_info.replay_seconds >= 0
+    assert refined.last_replay_info.source_beam == 1
+    assert refined.last_replay_info.target_beam == 2
+    for state, probability in refined.marginals()["m"].items():
+        assert probability == pytest.approx(expected[state], rel=1e-9)
+
+
+def test_refine_requires_history_after_filtering():
+    tracker = ModeTracker(build_system(), TRANS, beam=1, expand=1)
+    tracker.step({"alarm": False})
+    with pytest.raises(RuntimeError, match="retain_history=True"):
+        tracker.refine(exact=True)
+
+
+def test_refine_until_reports_resource_work_and_certificate_scope():
+    tracker = ModeTracker(
+        build_system(),
+        TRANS,
+        beam=1,
+        expand=1,
+        retain_history=True,
+    )
+    tracker.step({"alarm": True})
+
+    def evaluate(belief):
+        return SimpleNamespace(
+            root_action_certified=belief.exact,
+            certificate_scope=(
+                "exact-tracker-belief"
+                if belief.exact
+                else "tracked-belief-mass-unknown"
+            ),
+            maximum_regret=0.0 if belief.exact else 1.0,
+        )
+
+    result = tracker.refine_until(
+        evaluate,
+        lambda decision: decision.root_action_certified,
+    )
+
+    assert result.accepted
+    assert result.tracker.belief().exact
+    assert len(result.attempts) == 2
+    approximate, exact = result.attempts
+    assert approximate.steps_replayed == 0
+    assert approximate.certificate_scope == "tracked-belief-mass-unknown"
+    assert not approximate.accepted
+    assert exact.steps_replayed == 1
+    assert exact.generated_candidates > 0
+    assert exact.replay_seconds >= 0
+    assert exact.evaluation_seconds >= 0
+    assert exact.certificate_scope == "exact-tracker-belief"
+    assert exact.maximum_regret == 0.0
+    assert exact.accepted
+    assert result.total_steps_replayed == 1
+    assert result.total_replay_seconds >= 0
+    assert result.total_evaluation_seconds >= 0

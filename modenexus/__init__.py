@@ -63,7 +63,15 @@ from .planning import (
     PlannerCostBreakdown,
     TransitionCost,
 )
-from .tracking import ModeTracker, TrackedBelief, TrackingStepInfo
+from .tracking import (
+    ModeTracker,
+    TrackedBelief,
+    TrackingHistoryStep,
+    TrackingRefinementAttempt,
+    TrackingRefinementResult,
+    TrackingReplayInfo,
+    TrackingStepInfo,
+)
 from . import nnf_io
 
 __version__ = "0.1.0"
@@ -97,6 +105,10 @@ __all__ = [
     "minfill_order",
     "ModeTracker",
     "TrackedBelief",
+    "TrackingHistoryStep",
+    "TrackingReplayInfo",
+    "TrackingRefinementAttempt",
+    "TrackingRefinementResult",
     "TrackingStepInfo",
     "Planner",
     "BeliefActionEvaluation",
