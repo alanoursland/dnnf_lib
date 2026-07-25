@@ -2,7 +2,13 @@ import random
 
 import pytest
 
-from modenexus import CNF, compile_cnf, is_satisfiable, model_count
+from modenexus import (
+    CNF,
+    CircuitBuilder,
+    compile_cnf,
+    is_satisfiable,
+    model_count,
+)
 from helpers import random_cnf
 
 
@@ -59,10 +65,37 @@ def test_condition():
     cnf = CNF(num_vars=3, clauses=[(1, 2), (-1, 3)])
     circuit = compile_cnf(cnf, smooth=True)
     conditioned = circuit.condition({1: True})
-    assert 1 not in conditioned.mentioned_vars()
-    # models with x1=True: need x3; x2 free -> 2 models over {2,3};
-    # re-smoothing pads var 1 back in with a free gadget, doubling it.
-    assert model_count(conditioned.smooth()) == 4
+    assert 1 in conditioned.mentioned_vars()
+    assert 1 in conditioned.asserted_literals()[conditioned.root]
+    # Models with x1=True need x3; x2 remains free.
+    assert model_count(conditioned.smooth()) == 2
+
+
+def test_is_smooth_requires_all_declared_variables():
+    builder = CircuitBuilder(3)
+    partial = builder.finish(builder.literal(1))
+    assert not partial.is_smooth()
+    assert partial.smooth().is_smooth()
+
+
+def test_binary_forest_compiler_scales_with_linear_output():
+    sizes = []
+    for num_vars in (50, 100, 200):
+        cnf = CNF(
+            num_vars=num_vars,
+            clauses=[
+                (-var, var + 1)
+                for var in range(1, num_vars)
+            ],
+        )
+        circuit = compile_cnf(cnf, smooth=True)
+        assert model_count(circuit) == num_vars + 1
+        assert circuit.is_decomposable()
+        assert circuit.is_deterministic()
+        assert circuit.is_smooth()
+        sizes.append(len(circuit))
+    assert sizes[1] <= 2 * sizes[0] + 10
+    assert sizes[2] <= 2 * sizes[1] + 10
 
 
 def test_cache_shares_subcircuits():

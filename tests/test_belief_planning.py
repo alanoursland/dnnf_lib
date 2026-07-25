@@ -60,6 +60,44 @@ def test_plan_belief_maximizes_expected_utility():
     assert by_action["none"].expected_goal_probability == pytest.approx(0.0)
 
 
+def test_explicit_outcomes_replace_compiled_transition_weights():
+    planner = Planner()
+    planner.mode("mode", ("closed", "open"), priors=(0.9, 0.1))
+    planner.command("action", ("none", "open"))
+    planner.transition(
+        "mode",
+        "closed",
+        "open",
+        command=("action", "open"),
+        cost=1.0,
+    )
+    compiled = planner.compile(1)
+
+    result = compiled.plan_belief(
+        belief=[({"mode": "closed"}, 1.0)],
+        target={"mode": "open"},
+        actions=("open",),
+        outcome_model=lambda state, command: [
+            ({"mode": "open"}, 0.8),
+            ({"mode": "closed"}, 0.2),
+        ],
+    )
+    assert result.expected_goal_probability == pytest.approx(0.8)
+
+
+def test_conditional_planning_enforces_action_sequence_cap():
+    with pytest.raises(
+        PlanningBudgetExceeded, match="max_action_sequences=1"
+    ):
+        repair_planner(horizon=2).plan_belief(
+            belief=[({"mode": "a"}, 1.0)],
+            target={"done": True},
+            outcome_model=repair_outcomes,
+            observation_model=lambda state, command: dict(state),
+            max_action_sequences=1,
+        )
+
+
 def test_plan_belief_preserves_joint_correlations():
     planner = Planner()
     planner.mode("left", ("off", "on"), priors=(0.5, 0.5))
@@ -963,6 +1001,7 @@ def test_one_step_execution_updates_terminal_hidden_posterior():
     )
     execution = result.execution()
     assert execution.action == {"action": "charge"}
+    assert execution.belief()
     assert not execution.requires_observation
     step = execution.advance(outcome={"battery": "ready"})
 

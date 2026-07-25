@@ -4,6 +4,37 @@ Notable user-facing changes are recorded here for inclusion in release notes.
 
 ## Unreleased
 
+### Fixed — adversarial stress suite
+
+- **Stress GAP-001 — explicit outcome composition:** belief planning now
+  intersects target queries with already observed next-state evidence.
+  Explicit stochastic outcomes fully determine reached-state probability;
+  compiled transition weights no longer leak into a declared failure branch.
+- **Stress GAP-002/GAP-003 — structural conditioning and smoothness:**
+  `Circuit.condition()` retains evidence as asserted root literals, preventing
+  re-smoothing from freeing conditioned variables. `Circuit.is_smooth()` and
+  `FDCircuit.is_smooth()` now use the same global all-variables contract as
+  counting guards.
+- **Stress GAP-004 — singleton domains:** finite-domain variables may have one
+  value. Empty domains are rejected with declaration-specific names in
+  `SystemModel` and `Planner`.
+- **Stress GAP-005 — dtree order coverage:** `fd.dtree_order()` now returns a
+  full variable permutation, appending clause-unmentioned variables after the
+  dtree prefix.
+- **Stress GAP-006/GAP-007 — observed-variable posterior and VOI:** posterior
+  queries intersect their value mask with existing evidence instead of
+  replacing it. Observed variables return point masses, keeping entropy and
+  value-of-information results normalized and bounded.
+- **Stress GAP-008 — conditional sequence cap:** `max_action_sequences` is
+  checked before both open-loop and observation-conditional lookahead.
+- **Stress GAP-009 — chain compilation scaling:** acyclic unary/binary CNFs
+  now use exact tree-DP compilation. The recorded 800-variable implication
+  chain fell from roughly 9 seconds to 0.019 seconds; circuit size and compile
+  time are linear.
+- **Stress GAP-010 — belief accessor consistency:**
+  `BeliefPolicyExecution.belief()` now matches `ModeTracker.belief()` in the
+  monitor-plan-execute workflow.
+
 ### Fixed
 
 - **GAP-001 — observed-candidate VOI:** `CompiledSystem.value_of_information`
@@ -274,10 +305,11 @@ Notable user-facing changes are recorded here for inclusion in release notes.
 
 ### Verification
 
-- ModeNexus test suite: **391 passed, 1 skipped**.
-- Black-box API edge-case checks: all fixed cases report `OK`.
-- Companion applications: all **74 tests passed** in bounded partitions.
-  The adaptive controller passed in 93.24 seconds, the seven
-  islanded/regime tests passed in 173.12 seconds, and the latest seven
-  robust/execution integration regressions passed together in 28.64
+- ModeNexus test suite: **397 passed, 1 skipped**.
+- Adversarial stress suite: **1,086 passed, 0 xfailed** in 12.27
   seconds.
+- Black-box API edge-case checks: all fixed cases report `OK`.
+- Companion applications: all **81 tests passed** in bounded partitions.
+  A monolithic run passed its first 61 tests without a failure before
+  reaching the 10-minute aggregate budget; the remaining tests passed in
+  partitions of 9 tests (51.94 seconds) and 11 tests (42.67 seconds).

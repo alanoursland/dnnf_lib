@@ -763,8 +763,12 @@ class BeliefPolicyExecution:
         self._step = 0
         self._terminal = self._goal_reached()
 
-    @property
     def belief(self) -> Tuple[Tuple[Mapping[str, object], float], ...]:
+        """Return the current normalized latent belief.
+
+        This is a method, matching :meth:`ModeTracker.belief` in the
+        monitor-plan-execute workflow.
+        """
         return tuple(
             (_immutable_mapping(state), probability)
             for state, probability in self._belief
@@ -1275,6 +1279,10 @@ class Planner:
         the initial-mode likelihood used by estimation.  A mode with no
         declared transition rules is static and persists across every step."""
         values = tuple(values)
+        if not values:
+            raise ValueError(
+                f"mode {name!r} needs at least 1 value; got {values!r}"
+            )
         if priors is not None:
             priors = tuple(_normalize_categorical_weights(name, values, priors))
         self._modes[name] = (values, priors)
@@ -1282,11 +1290,22 @@ class Planner:
     def command(self, name: str, values: Sequence) -> None:
         """A per-step command input; include an inert value (e.g.
         ``"none"``) if doing nothing must be expressible."""
-        self._commands[name] = tuple(values)
+        values = tuple(values)
+        if not values:
+            raise ValueError(
+                f"command {name!r} needs at least 1 value; got {values!r}"
+            )
+        self._commands[name] = values
 
     def observable(self, name: str, values: Sequence = (False, True)) -> None:
         """A per-step sensed value, constrained via :meth:`behavior`."""
-        self._observables[name] = tuple(values)
+        values = tuple(values)
+        if not values:
+            raise ValueError(
+                f"observable {name!r} needs at least 1 value; got "
+                f"{values!r}"
+            )
+        self._observables[name] = values
 
     def behavior(
         self, fn: Callable[[Dict[str, object]], Formula]
@@ -1344,8 +1363,7 @@ class Planner:
                 cur, nxt = step_vars[t][name], step_vars[t + 1][name]
                 if not trans:
                     # A mode with no transition rules is static.  Lower
-                    # persistence directly instead of creating a one-value
-                    # selector, which is not a valid finite-domain variable.
+                    # persistence directly; no selector variable is needed.
                     for value in values:
                         m.add((cur != value) | (nxt == value))
                     continue
@@ -1886,6 +1904,15 @@ class CompiledPlanner:
             raise ValueError("actions must not be empty")
         for action in action_values:
             command_var._index(action)
+        if self.horizon > 1:
+            sequence_count = len(action_values) ** self.horizon
+            if sequence_count > max_action_sequences:
+                raise PlanningBudgetExceeded(
+                    f"belief lookahead requires {sequence_count} action "
+                    f"sequences, exceeding "
+                    f"max_action_sequences={max_action_sequences}",
+                    session.snapshot(),
+                )
 
         def step_evidence(
             state: Mapping[str, object],
@@ -1915,12 +1942,11 @@ class CompiledPlanner:
                     f"{evidence}"
                 )
             with_goal = dict(evidence)
-            with_goal.update(
-                {
-                    f"{name}@{target_step}": value
-                    for name, value in target.items()
-                }
-            )
+            for name, value in target.items():
+                key = f"{name}@{target_step}"
+                if key in with_goal and with_goal[key] != value:
+                    return 0.0
+                with_goal[key] = value
             log_numerator = self.system.log_evidence(with_goal)
             if log_numerator == -math.inf:
                 return 0.0
@@ -3244,14 +3270,6 @@ class CompiledPlanner:
             )
 
         if self.horizon > 1:
-            sequence_count = len(action_values) ** self.horizon
-            if sequence_count > max_action_sequences:
-                raise PlanningBudgetExceeded(
-                    f"belief lookahead requires {sequence_count} action "
-                    f"sequences, exceeding "
-                    f"max_action_sequences={max_action_sequences}",
-                    session.snapshot(),
-                )
             sequence_evaluations: List[BeliefSequenceEvaluation] = []
             for action_sequence in product(
                 action_values, repeat=self.horizon

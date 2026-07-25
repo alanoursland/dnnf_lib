@@ -232,6 +232,11 @@ class SystemModel:
         diagnoses and its priors weight the enumeration.  Priors are finite,
         non-negative relative weights with a positive total and are
         normalized automatically."""
+        values = tuple(values)
+        if not values:
+            raise ValueError(
+                f"variable {name!r} needs at least 1 value; got {values!r}"
+            )
         fd_var = self.cnf.spec.add_var(len(values))
         v = self._register(FiniteVar(name, values, fd_var))
         if priors is not None:
@@ -565,13 +570,24 @@ class CompiledSystem:
         if log_z == -math.inf:
             raise ValueError("evidence is inconsistent with the model")
         out: Dict[str, Dict[str, float]] = {}
+        conditioned_log_weights = self.log_weights_for(evidence)
+        spec = self.circuit.spec
         for name in (self.mode_vars if names is None else names):
             var = self.vars[name]
             dist: Dict[str, float] = {}
-            for value in var.values:
-                ev = dict(evidence)
-                ev[name] = value
-                dist[value] = math.exp(self.log_evidence(ev) - log_z)
+            for index, value in enumerate(var.values):
+                query_weights = list(conditioned_log_weights)
+                for other in range(len(var.values)):
+                    if other != index:
+                        query_weights[spec.mvlit(var.fd_var, other)] = (
+                            -math.inf
+                        )
+                log_joint = fd.log_wmc(self.circuit, query_weights)
+                dist[value] = (
+                    0.0
+                    if log_joint == -math.inf
+                    else math.exp(log_joint - log_z)
+                )
             out[name] = dist
         return out
 

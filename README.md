@@ -52,6 +52,13 @@ for cost, model in modenexus.enumerate_models(circuit, costs, k=5):
     print(cost, model)
 ```
 
+For acyclic unary/binary CNFs, the default compiler uses exact tree dynamic
+programming, so chain- and forest-structured inputs compile in time and
+space linear in their structure. Wider or cyclic theories automatically use
+the general component-caching DPLL compiler. `Circuit.condition(evidence)`
+asserts the evidence in its returned circuit, so later `smooth()`, counting,
+MPE, and enumeration cannot re-free conditioned variables.
+
 Long offline compiles can be bounded and observed cooperatively:
 
 ```python
@@ -297,6 +304,7 @@ step = execution.advance(
 )
 next_belief = step.posterior
 regime_marginals = step.posterior_marginals()
+current_execution_belief = execution.belief()
 ```
 
 The runner applies outcome and observation evidence with the same callbacks

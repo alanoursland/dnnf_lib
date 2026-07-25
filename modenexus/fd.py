@@ -57,8 +57,10 @@ class FDSpec:
         return len(self.sizes)
 
     def add_var(self, size: int) -> int:
-        if size < 2:
-            raise ValueError("domains need at least 2 values")
+        if size < 1:
+            raise ValueError(
+                f"domain size must be at least 1; got {size}"
+            )
         self.offsets.append(self.total)
         self.sizes.append(size)
         self.total += size
@@ -190,6 +192,8 @@ class FDCircuit:
         return True
 
     def is_smooth(self) -> bool:
+        if self.kinds[self.root] == FALSE:
+            return True
         vs = self.var_sets()
         for i, kind in enumerate(self.kinds):
             if kind != OR:
@@ -197,7 +201,9 @@ class FDCircuit:
             ch = self.children[i]
             if ch and any(vs[c] != vs[ch[0]] for c in ch[1:]):
                 return False
-        return True
+        return vs[self.root] == frozenset(
+            range(self.spec.num_vars)
+        )
 
     def is_deterministic(self) -> bool:
         """Syntactic check: every OR-child pair asserts conflicting values
@@ -769,6 +775,9 @@ def dtree_order(cnf: FDCnf, seed: int = 0, restarts: int = 2) -> List[int]:
     recursing into the halves, so branching decides separators first and
     the halves fall apart into independent components.
 
+    Returns a full permutation of all FD variables. Variables absent from
+    every clause are appended after the dtree-derived prefix.
+
     Status: experimental.  Measured (bench families): competitive with
     the dynamic heuristic but not dominant — ball-seeded cuts win on
     2-D grids, diameter-seeded cuts win on chains, and minimum cut
@@ -915,6 +924,11 @@ def dtree_order(cnf: FDCnf, seed: int = 0, restarts: int = 2) -> List[int]:
         rec(right)
 
     rec(list(range(len(clause_vars))))
+    # Match minfill_order's public contract: return a full permutation.
+    # Unmentioned variables are operationally irrelevant to the dtree, so
+    # appending them preserves the branching behavior while making the
+    # result safe for callers that treat an order as total.
+    place(range(spec.num_vars))
     return order
 
 

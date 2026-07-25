@@ -58,6 +58,31 @@ def test_mode_posteriors():
         assert sum(post[name].values()) == pytest.approx(1.0)
 
 
+def test_observed_variable_posterior_is_a_point_mass_and_voi_is_bounded():
+    model = SystemModel()
+    mode = model.mode("mode", ("ok", "bad"), priors=(0.9, 0.1))
+    model.sensor(
+        "alarm",
+        mode == "bad",
+        false_positive=0.05,
+        false_negative=0.05,
+    )
+    system = model.compile()
+
+    for observed in ("ok", "bad"):
+        posterior = system.mode_posteriors({"mode": observed})["mode"]
+        assert posterior == pytest.approx(
+            {
+                "ok": 1.0 if observed == "ok" else 0.0,
+                "bad": 1.0 if observed == "bad" else 0.0,
+            }
+        )
+        for _, value in system.value_of_information(
+            {"mode": observed}
+        ):
+            assert value == pytest.approx(0.0, abs=1e-12)
+
+
 def test_log_evidence():
     sys = build_two_valve_system()
     p_flow = 0.99 * 0.95

@@ -110,6 +110,8 @@ class Circuit:
         return True
 
     def is_smooth(self) -> bool:
+        if self.kinds[self.root] == FALSE:
+            return True
         vs = self.var_sets()
         for i, kind in enumerate(self.kinds):
             if kind != OR:
@@ -120,7 +122,9 @@ class Circuit:
             first = vs[ch[0]]
             if any(vs[c] != first for c in ch[1:]):
                 return False
-        return True
+        return vs[self.root] == frozenset(
+            range(1, self.num_vars + 1)
+        )
 
     def asserted_literals(self) -> List[frozenset]:
         """Per-node sets of literals every model of the node must satisfy
@@ -166,9 +170,20 @@ class Circuit:
         """Structurally condition on a partial assignment ``{var: value}``.
 
         Literals consistent with the assignment become TRUE, contradicted
-        literals become FALSE, and the circuit is re-simplified.  The result
-        mentions none of the assigned variables.
+        literals become FALSE, and the circuit is re-simplified.  The
+        assigned literals are asserted at the root, so subsequent smoothing,
+        counting, MPE, and enumeration preserve the evidence.
         """
+        for var, value in assignment.items():
+            if not isinstance(var, int) or not 1 <= var <= self.num_vars:
+                raise ValueError(
+                    f"condition variable {var!r} is outside "
+                    f"1..{self.num_vars}"
+                )
+            if not isinstance(value, bool):
+                raise ValueError(
+                    f"condition value for variable {var} must be boolean"
+                )
         b = CircuitBuilder(self.num_vars)
         new_id: List[int] = []
         for i, kind in enumerate(self.kinds):
@@ -188,7 +203,11 @@ class Circuit:
                 new_id.append(b.and_([new_id[c] for c in self.children[i]]))
             else:
                 new_id.append(b.or_([new_id[c] for c in self.children[i]]))
-        return b.finish(new_id[self.root])
+        asserted = [
+            b.literal(var if value else -var)
+            for var, value in sorted(assignment.items())
+        ]
+        return b.finish(b.and_([new_id[self.root], *asserted]))
 
     def smooth(self) -> "Circuit":
         """Return an equivalent smooth circuit mentioning all ``num_vars``

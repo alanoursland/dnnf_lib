@@ -9,6 +9,19 @@ import pytest
 from modenexus import fd
 
 
+def test_singleton_domain_and_total_dtree_order():
+    spec = fd.FDSpec()
+    singleton = spec.add_var(1)
+    binary = spec.add_var(2)
+    cnf = fd.FDCnf(spec)
+    cnf.add_clause([(binary, [1])])
+
+    circuit = fd.compile_fd(cnf, smooth=True)
+    assert fd.model_count(circuit) == 1
+    assert fd.dtree_order(cnf) == [binary, singleton]
+    assert sorted(fd.dtree_order(cnf)) == [singleton, binary]
+
+
 def random_fd_cnf(rng, num_vars, num_clauses):
     cnf = fd.FDCnf()
     sizes = [rng.randint(2, 4) for _ in range(num_vars)]

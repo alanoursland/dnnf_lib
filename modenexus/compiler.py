@@ -27,7 +27,7 @@ import sys
 from collections import Counter
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
-from .circuit import Circuit, CircuitBuilder
+from .circuit import FALSE, OR, Circuit, CircuitBuilder
 from .cnf import CNF
 from .compile_control import CompileControl
 
@@ -166,6 +166,186 @@ def _pick_var(clauses: ClauseSet, order: Optional[Sequence[int]]) -> int:
     return min(counts, key=lambda v: (-counts[v], v))
 
 
+def _compile_binary_forest(
+    clauses: Sequence[Clause],
+    num_vars: int,
+    builder: CircuitBuilder,
+    *,
+    smooth: bool,
+    session=None,
+) -> Optional[Tuple[Circuit, int]]:
+    """Compile an acyclic unary/binary CNF by linear-time tree DP.
+
+    General DPLL remains the fallback.  On a primal forest, however, each
+    subtree has only two boundary contexts (the parent variable's values),
+    so repeatedly rescanning and hashing the residual suffix is unnecessary.
+    The resulting circuit is smooth by construction.  Singleton OR wrappers
+    keep forced subtrees from being flattened and recopied at every ancestor.
+    """
+    if any(len(clause) > 2 for clause in clauses):
+        return None
+
+    unary_allowed: Dict[int, List[bool]] = {}
+    edge_clauses: Dict[Tuple[int, int], List[Clause]] = {}
+    adjacency: Dict[int, set] = {}
+    relevant: set = set()
+    edges: set = set()
+
+    for clause in clauses:
+        if len(clause) == 1:
+            lit = clause[0]
+            var = abs(lit)
+            relevant.add(var)
+            allowed = unary_allowed.setdefault(var, [True, True])
+            allowed[0 if lit > 0 else 1] = False
+            adjacency.setdefault(var, set())
+            continue
+        if len(clause) == 2:
+            left, right = sorted((abs(clause[0]), abs(clause[1])))
+            if left == right:
+                return None
+            pair = (left, right)
+            relevant.update(pair)
+            adjacency.setdefault(left, set()).add(right)
+            adjacency.setdefault(right, set()).add(left)
+            edge_clauses.setdefault(pair, []).append(clause)
+            edges.add(pair)
+
+    # A repeated clause on one edge is fine; only distinct primal edges
+    # participate in the cycle check.
+    parent = {var: var for var in relevant}
+
+    def find(var: int) -> int:
+        while parent[var] != var:
+            parent[var] = parent[parent[var]]
+            var = parent[var]
+        return var
+
+    for left, right in edges:
+        root_left, root_right = find(left), find(right)
+        if root_left == root_right:
+            return None
+        parent[root_right] = root_left
+
+    edge_allowed: Dict[
+        Tuple[int, int], Tuple[Tuple[bool, bool], Tuple[bool, bool]]
+    ] = {}
+    for pair, pair_clauses in edge_clauses.items():
+        left, right = pair
+        rows = []
+        for left_value in (False, True):
+            row = []
+            for right_value in (False, True):
+                values = {left: left_value, right: right_value}
+                row.append(
+                    all(
+                        any(
+                            values[abs(lit)] == (lit > 0)
+                            for lit in clause
+                        )
+                        for clause in pair_clauses
+                    )
+                )
+            rows.append(tuple(row))
+        edge_allowed[pair] = tuple(rows)  # type: ignore[assignment]
+
+    memo: Dict[Tuple[int, Optional[int], Optional[bool]], int] = {}
+
+    def allowed_with_parent(
+        var: int,
+        value: bool,
+        parent_var: Optional[int],
+        parent_value: Optional[bool],
+    ) -> bool:
+        allowed = unary_allowed.get(var, (True, True))
+        if not allowed[1 if value else 0]:
+            return False
+        if parent_var is None:
+            return True
+        pair = tuple(sorted((var, parent_var)))
+        matrix = edge_allowed[pair]
+        if var == pair[0]:
+            return matrix[1 if value else 0][
+                1 if parent_value else 0
+            ]
+        return matrix[1 if parent_value else 0][1 if value else 0]
+
+    def build(
+        var: int,
+        parent_var: Optional[int],
+        parent_value: Optional[bool],
+    ) -> int:
+        key = (var, parent_var, parent_value)
+        cached = memo.get(key)
+        if cached is not None:
+            if session is not None:
+                session.cache_hits += 1
+            return cached
+        if session is not None:
+            session.check(len(builder.kinds), len(memo))
+            session.decisions += 1
+        children = sorted(adjacency.get(var, ()) - {parent_var})
+        branches = []
+        for value in (False, True):
+            if not allowed_with_parent(
+                var, value, parent_var, parent_value
+            ):
+                continue
+            child_nodes = [
+                build(child, var, value) for child in children
+            ]
+            branch = builder.and_(
+                [
+                    builder.literal(var if value else -var),
+                    *child_nodes,
+                ]
+            )
+            if builder.kinds[branch] != FALSE:
+                branches.append(branch)
+        if not branches:
+            node = builder.false()
+        elif len(branches) == 1:
+            # CircuitBuilder.or_ intentionally collapses singleton ORs.
+            # Keeping this wrapper prevents a forced descendant AND from
+            # being flattened and recopied at every ancestor.
+            node = builder._emit(OR, 0, (branches[0],))
+        else:
+            node = builder.or_(branches)
+        memo[key] = node
+        if session is not None:
+            session.check(len(builder.kinds), len(memo))
+        return node
+
+    component_roots = []
+    seen: set = set()
+    for root in sorted(relevant):
+        if root in seen:
+            continue
+        stack = [root]
+        seen.add(root)
+        while stack:
+            current = stack.pop()
+            for neighbor in adjacency.get(current, ()):
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    stack.append(neighbor)
+        component_roots.append(root)
+    if session is not None:
+        session.components += len(component_roots)
+
+    root_nodes = [build(root, None, None) for root in component_roots]
+    if smooth:
+        for var in range(1, num_vars + 1):
+            if var not in relevant:
+                root_nodes.append(
+                    builder.or_(
+                        [builder.literal(var), builder.literal(-var)]
+                    )
+                )
+    root = builder.and_(root_nodes)
+    return builder.finish(root), len(memo)
+
+
 def compile_cnf(
     cnf: CNF,
     var_order: Optional[Sequence[int]] = None,
@@ -192,6 +372,9 @@ def compile_cnf(
         ``"minfill"`` — a static order from min-fill elimination on the
         primal graph (see :func:`minfill_order`), usually much better on
         structured instances.  Ignored when ``var_order`` is given.
+        Under the dynamic default, acyclic unary/binary instances use an
+        exact tree-DP fast path whose work and circuit size are linear in
+        the forest.
     control:
         Optional timeout, cancellation callback, node/cache budgets, and
         progress callback.  Interrupted exceptions carry partial statistics.
@@ -211,6 +394,27 @@ def compile_cnf(
             session.check(len(circuit), 0)
             session.finish(len(circuit), 0)
         return circuit
+    if var_order is None:
+        forest_limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(
+            max(forest_limit, 10000 + 50 * cnf.num_vars)
+        )
+        try:
+            forest_result = _compile_binary_forest(
+                pre,
+                cnf.num_vars,
+                builder,
+                smooth=smooth,
+                session=session,
+            )
+        finally:
+            sys.setrecursionlimit(forest_limit)
+        if forest_result is not None:
+            forest, forest_cache_entries = forest_result
+            if session is not None:
+                session.check(len(forest), forest_cache_entries)
+                session.finish(len(forest), forest_cache_entries)
+            return forest
     old_limit = sys.getrecursionlimit()
     sys.setrecursionlimit(max(old_limit, 10000 + 50 * cnf.num_vars))
     try:
