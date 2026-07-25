@@ -12,8 +12,10 @@ offline into a small circuit, then answer observation queries **online** in
 time linear in circuit size — including enumerating complete system states
 ordered from most to least probable, with leaf weights read as negative
 log probabilities. See [docs/DESIGN.md](docs/DESIGN.md) for the full
-technical treatment and [docs/FUTURE_WORK.md](docs/FUTURE_WORK.md) for the
-roadmap from next steps to blue sky.
+technical treatment, [CONTRACTS.md](CONTRACTS.md) for exactness, invariant,
+certificate, and complexity claims, and
+[docs/FUTURE_WORK.md](docs/FUTURE_WORK.md) for the roadmap from next steps to
+blue sky.
 
 **New to the library?** Start with the [tutorial](tutorial/README.md) —
 thirteen chapters from propositional logic to GPU-backed learning, written

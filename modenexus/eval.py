@@ -1,28 +1,8 @@
-"""Semiring evaluation of DNNF circuits (pure-Python reference backend).
+"""Pure-Python semiring evaluators for compiled Boolean circuits.
 
-A DNNF circuit evaluated over a commutative semiring computes a sum over
-models of a product over literals — different semirings answer different
-queries:
-
-=================  ==========  =========  ==============================
-Semiring           OR          AND        Query
-=================  ==========  =========  ==============================
-Boolean            or          and        satisfiability / consistency
-Counting           ``+``       ``*``      model counting
-Real               ``+``       ``*``      weighted model counting (WMC)
-Log                logsumexp   ``+``      log-space WMC
-Min-sum (tropical) min         ``+``      MPE over neg-log costs
-=================  ==========  =========  ==============================
-
-Counting-style semirings (Counting/Real/Log) require a **smooth d-DNNF**;
-min-sum requires only decomposability but is usually run on the smoothed
-circuit so every model assigns every variable.
-
-The neg-log view is the one used in model-based diagnosis: give literal
-``l`` the weight ``-log P(l)``; then the min-sum value of the circuit is
-the cost of the most probable model consistent with the theory, and k-best
-enumeration (see :mod:`modenexus.kbest`) yields models ordered from most to
-least probable.
+Available queries include satisfiability, counting, weighted counting,
+log-space evaluation, and minimum-cost models. Structural requirements are
+listed in ``CONTRACTS.md``.
 """
 
 from __future__ import annotations
@@ -124,11 +104,7 @@ def is_satisfiable(circuit: Circuit) -> bool:
 
 
 def model_count(circuit: Circuit) -> int:
-    """Exact model count over all ``num_vars`` variables.
-
-    Requires a smooth d-DNNF (compile with ``smooth=True`` or call
-    ``circuit.smooth()`` first).
-    """
+    """Count models; the circuit must be a smooth d-DNNF."""
     _require_smooth_ddnnf(circuit)
     vals = _forward(
         circuit,
@@ -142,8 +118,7 @@ def model_count(circuit: Circuit) -> int:
 
 
 def wmc(circuit: Circuit, weights: Sequence[float]) -> float:
-    """Weighted model count: sum over models of the product of literal
-    weights.  Requires a smooth d-DNNF."""
+    """Return the weighted model count for a smooth d-DNNF."""
     _require_smooth_ddnnf(circuit)
     vals = _forward(
         circuit,

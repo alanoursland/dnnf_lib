@@ -1,15 +1,7 @@
-"""A small propositional formula language with Tseitin CNF encoding.
+"""Propositional formulas and Tseitin encoding into :class:`CNF`.
 
-Formulas are built from :class:`Prop` atoms (propositional variables) with
-the connectives ``&``, ``|``, ``~``, ``>>`` (implies), plus the helpers
-:func:`iff`, :func:`xor`, :func:`exactly_one`, :func:`at_most_one`.
-
-``encode(formulas, cnf)`` converts a list of constraints to clauses inside
-a :class:`modenexus.cnf.CNF`, introducing fresh auxiliary (Tseitin) variables
-for internal connectives.  The encoding uses full biconditional Tseitin
-clauses, so auxiliary variables are *functionally determined* by the
-original variables: model counts over the original variables are preserved,
-and giving auxiliary literals neutral weight leaves WMC/MPE untouched.
+Use Python operators for connectives and :func:`encode` to add constraints.
+Encoding properties are documented in ``CONTRACTS.md``.
 """
 
 from __future__ import annotations

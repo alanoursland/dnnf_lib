@@ -1,29 +1,8 @@
-"""Batched GPU/CPU evaluation of DNNF circuits with PyTorch.
+"""Batched PyTorch evaluation for compiled circuits.
 
-A smooth d-DNNF is an arithmetic circuit, so semiring evaluation can be
-expressed as a layered tensor program:
-
-1. Nodes are renumbered by depth (longest path from a leaf); each depth is
-   one layer, and within a layer AND nodes precede OR nodes.
-2. A layer is evaluated by gathering child values from the already-computed
-   prefix (``index_select``) and segment-reducing them into parents
-   (``scatter_add`` for AND, ``scatter_reduce(amin)`` or a numerically
-   stable segment log-sum-exp for OR).
-3. A batch dimension carries many literal-weight vectors — e.g. many
-   evidence sets — through one forward pass.
-
-Two semirings are provided:
-
-* ``"logprob"``: values are log-weights; the root is ``log WMC``.
-  Because the circuit is evaluated with autograd-friendly ops, calling
-  ``.marginals(w)`` computes **all** posterior literal marginals in one
-  backward pass — Darwiche's differential semantics of d-DNNF
-  (``d logZ / d log w_l  =  P(l | evidence)``).
-* ``"neglog"``: values are additive costs (neg-log probabilities); the root
-  is the MPE cost, and ``.mpe(w)`` decodes the minimizing assignments.
-
-Import this module only when torch is installed (``pip install
-modenexus[torch]``).
+``TorchCircuit`` supports log-probability and negative-log semirings on CPU
+or GPU. Install the ``torch`` extra before importing this module. Structural
+requirements are in ``CONTRACTS.md``.
 """
 
 from __future__ import annotations
@@ -42,9 +21,7 @@ class TorchCircuit:
     Parameters
     ----------
     circuit:
-        A smooth d-DNNF (use ``compile_cnf(..., smooth=True)``).  Smoothness
-        and determinism are the caller's responsibility for ``"logprob"``;
-        ``"neglog"`` needs only decomposability.
+        The compiled circuit to lower.
     semiring:
         ``"logprob"`` or ``"neglog"``.
     device, dtype:

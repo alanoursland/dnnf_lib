@@ -1,16 +1,8 @@
-"""Gradient-based prior learning through the differentiable circuit.
+"""Gradient-based prior and observation learning with PyTorch.
 
-Where :meth:`modenexus.diagnosis.CompiledSystem.fit_priors` runs exact EM
-(ideal for independent categorical priors and modest data),
-:class:`PriorLearner` trains the same parameters by SGD on the torch
-backend: per-variable logits, softmax-normalized into value weights,
-maximizing the log-likelihood of partially observed telemetry via
-batched masked log-WMC.  The gradient path scales to large telemetry
-sets (observations dedup into weighted unique evidence masks and batch
-through one layered forward), runs on GPU, and composes with anything
-else differentiable — e.g. an observation model producing the masks.
-
-Requires torch (``pip install modenexus[torch]``).
+The trainers optimize differentiable circuit objectives on CPU or GPU.
+Install the ``torch`` extra before importing this module. Learning assumptions
+are in ``CONTRACTS.md``.
 """
 
 from __future__ import annotations
@@ -180,17 +172,9 @@ class PriorLearner:
 
 
 class ObservationTrainer:
-    """Train a neural observation model end-to-end through the circuit.
+    """Train a neural observation model through a compiled circuit.
 
-    The network maps raw sensor input to per-value log-likelihoods for
-    the named observables (Pearl virtual evidence); the training signal
-    is the log-WMC of that soft evidence under the compiled model — so
-    the detectors learn from telemetry plus the logical structure, with
-    **no labels for the observables themselves**.
-
-    The network's output width must be ``sum(len(var.values) for the
-    named observables)``, in name order, each block in the variable's
-    value order.
+    Network output contains one value block per named observable.
     """
 
     def __init__(self, system, names, device="cpu",
@@ -222,12 +206,7 @@ class ObservationTrainer:
 
     def log_likelihood(self, local: torch.Tensor,
                        masks: "torch.Tensor" = None) -> torch.Tensor:
-        """Per-row log-WMC given (B, width) local log-likelihoods.
-
-        Each observable's block is log-softmax-normalized first: virtual
-        evidence is only defined up to scale, and without normalization
-        the likelihood is unbounded (the network could inflate every
-        value's likelihood at once)."""
+        """Return per-row log-WMC for local likelihood blocks and masks."""
         local = torch.cat(
             [
                 torch.log_softmax(local[:, a:b], dim=1)
@@ -245,11 +224,7 @@ class ObservationTrainer:
         return self.tc(w)
 
     def masks_for(self, observations) -> torch.Tensor:
-        """Hard-evidence masks (B, total): -inf on ruled-out values.
-        This is the grounding signal — soft neural evidence alone is
-        degenerate (reporting the a-priori likely value is optimal);
-        hard evidence elsewhere in the structure is what forces the
-        detectors to track their inputs."""
+        """Return hard-evidence masks with ``-inf`` on ruled-out values."""
         spec = self.system.circuit.spec
         rows = torch.zeros(len(observations), spec.total,
                            dtype=self.dtype, device=self.device)

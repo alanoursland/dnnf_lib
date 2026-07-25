@@ -1,27 +1,7 @@
-"""Negation Normal Form circuits and the DNNF family.
+"""Boolean NNF circuit representation, inspection, and transformations.
 
-An NNF circuit is a rooted DAG whose leaves are literals (or the constants
-true/false) and whose internal nodes are AND / OR gates.  The properties that
-make these circuits useful for tractable reasoning are:
-
-* **Decomposability** (the "D" in DNNF): the children of every AND node
-  mention pairwise-disjoint sets of variables.  This makes satisfiability,
-  minimum-cost model extraction, and model enumeration linear-time in the
-  circuit size.
-* **Determinism** (d-DNNF): the children of every OR node are pairwise
-  logically inconsistent.  Together with decomposability this makes (weighted)
-  model counting linear-time.
-* **Smoothness**: the children of every OR node mention the same set of
-  variables.  Required for counting-style semiring evaluations to be correct;
-  it can always be enforced with only a modest size increase.
-
-Nodes are stored in flat parallel arrays, in topological order (children
-always precede parents).  This representation is convenient both for the
-pure-Python evaluators and for exporting the circuit as a layered tensor
-program for GPU evaluation.
-
-Literals use the DIMACS convention: variable ``v`` (1-based) appears as the
-integers ``+v`` and ``-v``.
+Circuits use flat topological arrays and DIMACS literals. See
+``CONTRACTS.md`` for DNNF property definitions and evaluator requirements.
 """
 
 from __future__ import annotations
@@ -144,13 +124,7 @@ class Circuit:
         return asserted
 
     def is_deterministic(self) -> bool:
-        """Syntactic determinism check (sufficient, not necessary).
-
-        Two OR-children are considered provably inconsistent when one asserts
-        a literal whose negation the other asserts (see
-        :meth:`asserted_literals`).  This covers decision nodes produced by
-        the compiler and smoothing gadgets ``(v OR ~v)``.
-        """
+        """Run the circuit's conservative syntactic determinism check."""
         asserted = self.asserted_literals()
         for i, kind in enumerate(self.kinds):
             if kind != OR:
@@ -167,13 +141,7 @@ class Circuit:
     # Transformations (each returns a new Circuit)
     # ------------------------------------------------------------------
     def condition(self, assignment: Dict[int, bool]) -> "Circuit":
-        """Structurally condition on a partial assignment ``{var: value}``.
-
-        Literals consistent with the assignment become TRUE, contradicted
-        literals become FALSE, and the circuit is re-simplified.  The
-        assigned literals are asserted at the root, so subsequent smoothing,
-        counting, MPE, and enumeration preserve the evidence.
-        """
+        """Return a simplified circuit conditioned by ``{var: bool}``."""
         for var, value in assignment.items():
             if not isinstance(var, int) or not 1 <= var <= self.num_vars:
                 raise ValueError(
@@ -210,13 +178,7 @@ class Circuit:
         return b.finish(b.and_([new_id[self.root], *asserted]))
 
     def smooth(self) -> "Circuit":
-        """Return an equivalent smooth circuit mentioning all ``num_vars``
-        variables at the root.
-
-        Missing variables are filled in with deterministic gadgets
-        ``(v OR ~v)``, so determinism and decomposability are preserved.
-        A FALSE root is returned unchanged.
-        """
+        """Return the smoothed form used by counting evaluators."""
         if self.kinds[self.root] == FALSE:
             return Circuit(self.num_vars, [FALSE], [0], [()], 0)
         vs = self.var_sets()
@@ -280,21 +242,7 @@ class Circuit:
 
 
 class CircuitBuilder:
-    """Constructs circuits bottom-up with hash-consing and on-the-fly
-    algebraic simplification.
-
-    Simplifications applied:
-
-    * AND: flattens nested ANDs, drops TRUE children, collapses to FALSE if
-      any child is FALSE, deduplicates children, collapses singletons.
-    * OR: drops FALSE children, collapses to TRUE if any child is TRUE,
-      deduplicates children, collapses singletons.  Nested ORs are *not*
-      flattened, since that could destroy determinism guarantees the caller
-      is relying on.
-
-    Nodes are emitted in topological order by construction, so a builder's
-    output can be evaluated with a single forward sweep.
-    """
+    """Build hash-consed circuits with basic AND/OR simplification."""
 
     def __init__(self, num_vars: int):
         self.num_vars = num_vars

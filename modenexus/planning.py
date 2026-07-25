@@ -1,25 +1,8 @@
-"""Unified planning and estimation on one compiled circuit (MEXEC-style).
+"""Transition-system compilation, estimation, and belief planning.
 
-Declare a transition system — modes (with priors), per-step commands,
-observables with behavior constraints, and command-conditioned
-transitions with neg-log costs — and compile an n-step unrolling into a
-single FD circuit.  The same compiled structure answers, by tropical
-evaluation with different leaves clamped (Barrett 2005; Darwiche &
-Marquis 2004):
-
-* **mode estimation** — clamp observed sensor values (and known
-  commands) over the first k steps; the min-cost model's mode variables
-  are the most likely trajectory;
-* **reconfiguration planning** — clamp current modes at step 0 and
-  target modes at step n; the min-cost model's command variables are
-  the most probable plan;
-* **planning under observations** — clamp observations instead of (or
-  in addition to) the current mode: the plan is computed from what the
-  sensors say the state is, without a separate estimation pass.
-
-v1 simplifications: transition preconditions are command values;
-``noop`` (persistence) always available at cost 0; observables are
-exact (wrap noisy sensing in the behavior constraints if needed).
+Use :class:`Planner` to declare a model and :class:`CompiledPlanner` for
+trajectory, open-loop, conditional, and robust queries. Detailed probability
+and certificate semantics are in ``CONTRACTS.md``.
 """
 
 from __future__ import annotations
@@ -444,13 +427,7 @@ class BeliefSequenceEvaluation:
 
 @dataclass(frozen=True)
 class BeliefPolicyResult:
-    """Best bounded-lookahead sequence under a joint initial belief.
-
-    ``observation_branching`` is false for this open-loop result: stochastic
-    outcomes are integrated exactly, but future commands do not branch on
-    observations. Supply an observation model to receive a
-    :class:`ConditionalBeliefPolicyResult`.
-    """
+    """Selected open-loop sequence and its evaluated alternatives."""
 
     commands: Tuple[Dict[str, object], ...]
     expected_goal_probability: float
@@ -471,17 +448,10 @@ class BeliefPolicyResult:
 
 @dataclass(frozen=True)
 class BeliefPolicyBranch:
-    """One observation edge in a conditional belief-policy tree.
+    """One observation edge and posterior in a conditional policy tree.
 
-    ``posterior`` is the normalized observation-conditioned joint belief the
-    planner optimized the continuation against — the hidden states that
-    justify the branch's action, exposed instead of forcing applications to
-    re-derive outcome propagation and Bayes weighting themselves.  For the
-    aggregated pruned-observation fallback branch on
-    :attr:`BeliefPolicyNode.fallback_policy`, ``contributing_observations``
-    lists the pruned observations merged into that posterior. Observation,
-    posterior-state, and contributing-observation mappings are recursively
-    immutable so execution cannot diverge from the certified snapshot.
+    ``contributing_observations`` identifies observations merged into a
+    fallback branch.
     """
 
     observation: Mapping[str, object]
@@ -526,21 +496,10 @@ class BeliefPolicyBranch:
 
 @dataclass(frozen=True)
 class BeliefPolicyRouting:
-    """Structured result of routing an observation through a policy node.
+    """Observation-routing result.
 
-    ``kind`` is one of:
-
-    - ``"exact"``: the observation, projected onto the node's
-      :attr:`~BeliefPolicyNode.observation_schema`, matched a retained
-      branch (``branch`` and ``policy`` are set);
-    - ``"fallback"``: a well-formed observation matched no retained branch
-      and routed to the pruned-observation fallback policy (``branch`` is
-      the aggregate :attr:`~BeliefPolicyNode.fallback_branch`);
-    - ``"terminal"``: the node has no continuations (end of the policy);
-    - ``"unmatched"``: no retained branch matched and no fallback exists.
-
-    ``projected_observation`` is the schema projection actually compared,
-    so callers can see exactly which fields participated in matching.
+    ``kind`` is ``"exact"``, ``"fallback"``, ``"terminal"``, or
+    ``"unmatched"``. ``projected_observation`` shows the compared fields.
     """
 
     kind: str
@@ -560,14 +519,8 @@ class BeliefPolicyRouting:
 class BeliefPolicyNode:
     """One action and its observation-contingent continuations.
 
-    ``fallback_policy`` receives observations omitted by threshold or top-k
-    pruning; ``fallback_branch`` carries that fallback's aggregate posterior
-    and the pruned observations contributing to it.
-    ``retained_observation_probability`` includes all later levels;
-    ``discarded_observation_probability`` is local to this node. The action
-    mapping and every mapping reachable through the policy tree are
-    recursively immutable; use ``dict(node.action)`` for a mutable execution
-    copy.
+    Pruned observations use ``fallback_policy``. Use ``dict(node.action)``
+    when a mutable execution copy is needed.
     """
 
     action: Mapping[str, object]
@@ -603,13 +556,7 @@ class BeliefPolicyNode:
     def route(
         self, observation: Mapping[str, object]
     ) -> BeliefPolicyRouting:
-        """Route an observation and report how it was matched.
-
-        The observation is intersected with :attr:`observation_schema`, so
-        unrelated telemetry fields are ignored. The intersection is matched
-        exactly: callback mappings may have heterogeneous key sets, and an
-        absent key is distinct from a present key whose value is ``None``.
-        """
+        """Project and route an observation through this node."""
         if not self.branches and self.fallback_policy is None:
             return BeliefPolicyRouting(
                 kind="terminal",
@@ -647,17 +594,7 @@ class BeliefPolicyNode:
     def continuation(
         self, observation: Mapping[str, object]
     ) -> Optional["BeliefPolicyNode"]:
-        """Return the continuation for an observation via :meth:`route`.
-
-        Extra observation keys are projected away before matching. Absence
-        is part of observation identity, so heterogeneous callback mappings
-        route exactly with only the keys they originally supplied. An
-        observation matching no retained branch returns the pruned-
-        observation fallback (or ``None`` when the policy is terminal or
-        has no fallback). Use
-        :meth:`route` to distinguish exact, fallback, terminal, and
-        unmatched routing explicitly.
-        """
+        """Return the routed continuation, fallback, or ``None``."""
         return self.route(observation).policy
 
     @property
@@ -979,14 +916,9 @@ class BeliefPolicyExecution:
 
 @dataclass(frozen=True)
 class BeliefActionCertificate:
-    """Policy-only and belief-composed utility and goal-probability bounds
-    for one root action.
+    """Reported policy and belief-composed bounds for one root action.
 
-    The ``policy_*`` fields are scoped to the supplied normalized belief;
-    the unprefixed bounds compose tracker-retained mass adversarially.
-    ``policy_goal_probability`` is exact for the executable (possibly
-    observation-pruned) policy; ``policy_goal_probability_upper_bound``
-    bounds the unrestricted full-observation optimum for this root action.
+    See ``CONTRACTS.md`` for field relationships and certificate scope.
     """
 
     action: Mapping[str, object]
@@ -1060,47 +992,11 @@ class RobustPolicyEvaluation:
 
 @dataclass(frozen=True)
 class ConditionalBeliefPolicyResult:
-    """Best bounded policy tree and all alternative root actions.
+    """Conditional policy, alternatives, diagnostics, and certificates.
 
-    Approximate results preserve all probability mass by merging pruned
-    observations into fallback posteriors. Their utility is the exact value
-    of that coarsened policy and a lower bound on the unrestricted
-    full-observation optimum. Per-action upper bounds use the maximum
-    remaining reward on collapsed branches. Root ranking is certified when
-    the selected lower bound dominates every alternative upper bound.
-    ``action_certificates`` additionally compose tracker-retained mass; the
-    ``policy_*`` fields preserve the certificate scoped only to the supplied
-    normalized belief.
-
-    Under a reliability constraint, ``feasible`` reports whether the
-    selected policy meets ``goal_probability_constraint`` (and the optional
-    ``branch_goal_probability_constraint``) against the supplied belief.
-    ``best_achievable_goal_probability_scope`` states whether the reported
-    best probability covers the full observation-policy space or only the
-    selected observation coarsening.  Under pruning, the latter is paired
-    with ``best_achievable_goal_probability_upper_bound`` for the
-    unrestricted space.  ``constraint_optimality`` describes frontier
-    truncation, while ``observation_partition_optimality`` separately
-    describes observation coarsening. ``constraint_certification`` scopes
-    feasibility through pruning and tracker mass like the utility
-    certificates. Every active whole-policy and per-branch floor
-    participates in ``constraint_certification``. Observation pruning makes
-    branch-floor feasibility ``indeterminate`` unless infeasibility is
-    established without aggregation.
-
-    Frontier diagnostics report aggregate generated/retained point counts,
-    the largest nondominated pre-cap frontier, truncation counts by depth and
-    root action, and a conservative feasible-utility upper bound/gap. The
-    same search counters appear in :class:`PlanningStats`.
-
-    Scenario-robust results expose independently audited per-scenario
-    metrics and all deduplicated generated candidates. Their
-    ``robust_optimality`` and ``certificate_scope`` explicitly identify the
-    bounded weight-grid search. ``inherited_metric_scope`` and
-    ``selected_scenario_weights`` identify scalarized policy metrics as those
-    of the mixture that generated the selected common policy. Robust branch
-    fields report the minimum continuation probability, limiting
-    scenario/observation path, feasibility, and pruning-aware certification.
+    Approximation, reliability, frontier, robust-scenario, and certificate
+    scope are reported in the corresponding fields. See ``CONTRACTS.md`` for
+    their relationships and interpretation.
     """
 
     policy: BeliefPolicyNode
@@ -1523,13 +1419,11 @@ class CompiledPlanner:
         target: Dict[str, object] = None,
         observations: Optional[Sequence[Dict[str, object]]] = None,
     ) -> Optional[Tuple[float, List[Dict[str, object]]]]:
-        """Most probable command sequence reaching ``target`` within the
-        horizon, or None if unreachable.  ``current`` (mode clamp at
-        step 0) is optional when ``observations`` determine the state —
-        planning directly from sensor readings, no separate estimation
-        pass.  Returns ``(cost, [per-step {command: value}])``.  The cost is
-        the selected normalized initial-state neg-log prior plus transition
-        costs; use :meth:`plan_detailed` for the decomposition."""
+        """Return ``(cost, commands)`` for a target, or ``None``.
+
+        ``current`` may be omitted when observations supply the initial
+        evidence. Use :meth:`plan_detailed` for trajectory and cost fields.
+        """
         result = self.plan_detailed(current, target, observations)
         if result is None:
             return None
@@ -1541,14 +1435,7 @@ class CompiledPlanner:
         target: Dict[str, object] = None,
         observations: Optional[Sequence[Dict[str, object]]] = None,
     ) -> Optional[PlanResult]:
-        """Return a plan with its state trajectory and cost decomposition.
-
-        Hard evidence contributes zero finite cost; it removes inconsistent
-        assignments.  ``initial_state_cost`` is the selected normalized
-        step-0 prior, and each selected transition contributes its declared
-        neg-log cost.  ``other_model_cost`` makes any future weighted model
-        terms explicit instead of silently folding them into the total.
-        """
+        """Return a plan with trajectory and cost decomposition, or ``None``."""
         evidence = self._step_evidence(observations)
         if current:
             for name, value in current.items():
@@ -1608,125 +1495,33 @@ class CompiledPlanner:
         | BeliefPolicyResult
         | ConditionalBeliefPolicyResult
     ):
-        """Choose one action by exact expectation over a correlated belief.
+        """Plan from a weighted joint belief.
 
-        With ``horizon=1`` this returns :class:`BeliefPlanResult`.  Longer
-        horizons perform bounded lookahead.  Without ``observation_model``
-        they return an open-loop :class:`BeliefPolicyResult`.  With an
-        observation callback they return
-        :class:`ConditionalBeliefPolicyResult`, whose future actions branch
-        on the observations produced after each stochastic outcome.
-        One-step and conditional results expose ``execution()`` to consume
-        real physical evidence and carry the updated belief into replanning.
+        Horizon one returns :class:`BeliefPlanResult`. Longer horizons return
+        an open-loop :class:`BeliefPolicyResult`, or a
+        :class:`ConditionalBeliefPolicyResult` when ``observation_model`` is
+        supplied.
 
-        ``belief`` has the shape returned by
-        :meth:`modenexus.ModeTracker.belief`: ``[(joint_state, mass), ...]``.
-        Masses are validated and normalized; correlations between modes are
-        preserved.  State keys not used by this planner are ignored, and
-        omitted planner modes remain latent. Tracker beliefs also carry
-        exactness and retained-mass metadata. Conditional-policy certificates
-        compose that metadata adversarially; unknown tracker mass prevents a
-        beam-only certificate from being presented as end-to-end.
+        ``belief`` contains ``(joint_state, mass)`` pairs. ``outcome_model``
+        supplies ``(next_state_updates, probability)`` pairs.
+        ``observation_model`` may return one observation or a weighted list.
+        Conditional lookahead requires an outcome model.
 
-        By default, transition-selector weights in the compiled planner
-        define ``P(target at step 1 | state, action)``.  ``outcome_model`` can
-        instead supply explicit stochastic outcomes as
-        ``[(next_state_updates, probability), ...]`` for each state/action.
-        Updates may be partial; unspecified modes persist from the belief
-        state.  This separates physical success probabilities from action
-        costs when planner transition costs represent operational effort.
-        Conditional lookahead requires this explicit outcome model.
+        ``outcome_scenarios`` with ``robust_objective="maximin"`` enables the
+        bounded scenario-weight search. ``robust_weight_resolution`` and
+        ``max_robust_candidates`` control that search.
 
-        ``observation_model(next_state, command)`` returns either one
-        observation mapping or a probability-weighted sequence of observation
-        mappings.  States producing the same observation are combined into a
-        posterior belief before the next action is optimized.  Returning the
-        state itself implements perfect observation; returning an empty
-        mapping implements no information. Observation mappings at one node
-        may use heterogeneous key sets. Policy routing treats absence as part
-        of observation identity while ignoring telemetry keys never emitted
-        by any retained branch at that node.
-
-        ``outcome_scenarios`` enables bounded robust conditional planning.
-        It maps scenario names to outcome callbacks with the same contract as
-        ``outcome_model``. With ``robust_objective="maximin"``, the planner
-        generates common executable policies from a positive scenario-weight
-        grid, evaluates every policy under every scenario, and selects the
-        greatest worst-case utility (subject to ``min_goal_probability`` in
-        every scenario when supplied). If no generated candidate meets that
-        floor, the most reliable candidate is returned with
-        ``robust_feasible=False``. ``robust_weight_resolution`` controls grid
-        density and ``max_robust_candidates`` is a hard generation cap.
-        Results expose every scenario/candidate evaluation and label search
-        optimality ``"weight-grid-heuristic"`` rather than claiming global
-        robust optimality. Inherited ``expected_*`` fields remain scoped to
-        the selected candidate's generating mixture; the result exposes
-        ``inherited_metric_scope`` and ``selected_scenario_weights`` directly.
-        ``min_branch_goal_probability`` additionally requires every audited
-        observation continuation to meet the floor in every scenario and
-        reports the limiting scenario/path. Observation fallback pruning
-        keeps branch certification indeterminate.
-
-        Unlike ``belief`` (validated and normalized above), the
-        probabilities returned by ``outcome_model`` and ``observation_model``
-        are a physical distribution over the branches of that one call and
-        must already sum to 1 within ``1e-6`` relative tolerance; a total
-        outside that tolerance raises ``ValueError`` naming the state,
-        action, and observed total rather than being silently rescaled.
-        This catches, for example, two outcomes summing to 0.5 because a
-        third branch was left out.
-
-        Approximate conditional planning can set
-        ``min_observation_probability`` and/or
-        ``max_observations_per_node``. Rare observation groups are merged
-        into one fallback posterior rather than removed from the expected
-        value. The returned policy routes unmatched observations through
-        ``BeliefPolicyNode.fallback_policy`` and reports retained probability
-        mass, pruning counts, per-action utility bounds, maximum regret, and
-        exact, certified, or heuristic root-action ranking.
+        ``min_observation_probability`` and ``max_observations_per_node``
+        enable observation pruning. Reliability floors are set with
+        ``min_goal_probability`` and ``min_branch_goal_probability``.
 
         Utility is ``goal_reward * P(target) - cost_weight * action_cost``.
-        For a single command variable, ``action_costs`` is either a mapping
-        from command values to costs or a callable receiving the command
-        dictionary.  Evaluations are returned best-first.  The explicit
-        sequence, outcome-branch, policy-node, and observation-branch limits
-        make exponential lookahead inspectable and provisionable.
+        The sequence, branch, policy-node, observation, candidate, and
+        frontier arguments bound work or approximation.
 
-        ``min_goal_probability`` adds a chance constraint: feasibility
-        (policy goal probability at or above the floor) is decided first,
-        and utility ranks only the feasible candidates.  In conditional
-        planning the constraint is enforced over the whole policy — not per
-        node — via Pareto-frontier dynamic programming over
-        (goal probability, expected cost) pairs, so reliability spent in one
-        observation branch can compensate for another branch's ceiling.
-        ``min_branch_goal_probability`` optionally adds the stricter safety
-        variant: every observation branch's continuation must individually
-        satisfy the floor.  Infeasibility is reported, not raised: the most
-        reliable policy is returned with ``feasible=False`` and
-        ``best_achievable_goal_probability``.  ``max_frontier_points``
-        bounds each Pareto frontier; when the cap actually binds, the result
-        says ``constraint_optimality="frontier-truncated"`` (feasibility and
-        best-achievable stay exact; only cost-optimality may be lost).
-        Result and progress statistics expose generated/retained points,
-        largest frontier, truncation by depth/root action, and a conservative
-        utility upper bound/gap for provisioning.
-        ``constraint_certification`` composes observation pruning and
-        tracker-retained mass into ``certified-feasible``,
-        ``certified-infeasible``, or ``indeterminate``, scoped exactly like
-        the utility certificates. Every active whole-policy and branch floor
-        participates. A merged observation fallback cannot certify every
-        contributing raw branch and is therefore ``indeterminate`` unless an
-        unaggregated result proves infeasibility. Under a constraint, the
-        utility-regret fields still compare utilities across the reported
-        per-action policies; feasibility governs selection.
-
-        ``control`` optionally supplies cooperative wall-clock limits,
-        a cancellation callback, and progress reporting, mirroring
-        :class:`modenexus.CompileControl` for compilation.  Cancellations
-        raise :class:`PlanningCancelled`; time and resource budgets raise
-        :class:`PlanningBudgetExceeded` (also a ``ValueError``).  Both carry
-        a :class:`PlanningStats` snapshot with the partial search counts and
-        the best fully evaluated root action so far.
+        ``control`` supplies optional wall-clock limits, cancellation, and
+        progress reporting. See ``CONTRACTS.md`` for probability,
+        approximation, chance-constraint, and certificate semantics.
         """
         if outcome_scenarios is not None:
             return self._plan_belief_robust(
@@ -1981,14 +1776,7 @@ class CompiledPlanner:
             kind: str,
             context: str,
         ) -> List[Tuple[Dict[str, object], float]]:
-            """Validate a callback's (item, probability) pairs and require
-            the total to already be normalized to one within tolerance.
-
-            Silent normalization of an arbitrary positive total would accept
-            e.g. two outcomes summing to 0.5 as if that were the complete
-            distribution, masking a forgotten branch; instead any total
-            outside a small tolerance of 1.0 is a contextual ValueError.
-            """
+            """Validate one callback-provided probability distribution."""
             checked = []
             total = 0.0
             for index, item in enumerate(entries):
@@ -2575,17 +2363,7 @@ class CompiledPlanner:
                 depth: int,
                 root_action: Optional[object],
             ):
-                """Keep the nondominated (goal desc, cost asc) frontier,
-                capped at ``max_frontier_points`` with endpoints preserved.
-
-                Dominance pruning is lossless for the tree DP: any ancestor
-                combination using a dominated point can swap in the
-                dominating point with goal probability no worse and cost no
-                higher.  Capping only drops interior points, so feasibility
-                detection and the maximum achievable goal probability stay
-                exact; only cost-optimality can degrade, which the result
-                reports as ``frontier-truncated``.
-                """
+                """Prune and cap a goal-probability/cost frontier."""
                 counters["frontier_generated_points"] += len(points)
                 points.sort(key=lambda point: (-point[0], point[1]))
                 kept = []
@@ -2626,16 +2404,7 @@ class CompiledPlanner:
                 branch_floor: Optional[float],
                 root_action: Optional[object] = None,
             ) -> List[Tuple[float, float, BeliefPolicyNode]]:
-                """Pareto frontier of (goal probability, expected cost,
-                policy) points for this belief.
-
-                A chance constraint cannot be enforced per node: the
-                reliability one observation branch must deliver depends on
-                what the other branches deliver, so whole frontiers
-                propagate upward and the floor is applied only at the root.
-                ``branch_floor`` is the stricter per-branch variant and is
-                applied to every child frontier.
-                """
+                """Build the policy frontier for one belief node."""
                 terminal_mass, active_belief = split_terminal_belief(
                     branch_belief, step
                 )

@@ -1,25 +1,6 @@
-"""Ordered model enumeration over DNNF circuits.
+"""Lazy cost-ordered enumeration over compiled circuits.
 
-Given additive per-literal costs (typically neg-log probabilities), lazily
-enumerate models of the circuit from lowest to highest total cost — i.e.
-from most to least probable.  This is the query at the heart of DNNF-based
-diagnosis: the ranked stream of "leaf interpretations" (complete system
-states) consistent with the model and observations.
-
-The algorithm is the classic lazy k-best scheme for AND/OR hypergraphs
-(cf. Huang & Chiang, "Better k-best parsing", 2005):
-
-* a literal leaf has exactly one derivation;
-* an OR node's ranked derivations are a lazy heap-merge of its children's
-  ranked streams (disjoint when the circuit is deterministic);
-* an AND node's ranked derivations are a lazy monotone product of its
-  children's streams, explored frontier-first with a heap.
-
-Decomposability guarantees that an AND node combines assignments over
-disjoint variables, so concatenation is always consistent.  On a smooth,
-deterministic circuit the enumeration is duplicate-free and each yielded
-assignment is total; a safety dedup at the root guards non-deterministic
-inputs.
+See ``CONTRACTS.md`` for structural requirements and marginal-MAP scope.
 """
 
 from __future__ import annotations
@@ -115,24 +96,10 @@ def enumerate_map(
     map_vars,
     k: Optional[int] = None,
 ) -> Iterator[Tuple[float, Dict[int, bool]]]:
-    """Ranked **marginal MAP**: yield assignments to ``map_vars`` ordered by
-    their *summed* probability mass over all other variables, best first.
+    """Yield marginal-MAP assignments as ``(neg_log_mass, assignment)``.
 
-    Yields ``(cost, {map_var: bool})`` where ``cost = -log( sum over
-    completions of the product of literal weights )``; normalize externally
-    by log-WMC to get posteriors.
-
-    Marginal MAP is intractable on arbitrary d-DNNF; this requires a
-    **constrained** circuit in which decisions on ``map_vars`` sit above all
-    other decisions (compile with ``var_order=list(map_vars)`` so they are
-    branched first).  The structure is verified and a ValueError is raised
-    if it does not hold.
-
-    Mechanics: one log-sum-exp sweep computes every node's summed value;
-    nodes mentioning no map variable become terminals with that value, and
-    the lazy k-best machinery then enumerates over the remaining upper
-    region, where every OR is a decision on a map variable (max) and every
-    AND is a product (sum of costs).
+    ``map_vars`` must have been placed first in the compilation order. A
+    structurally incompatible circuit raises :class:`ValueError`.
     """
     from .eval import log_values
 

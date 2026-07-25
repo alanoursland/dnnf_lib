@@ -1,30 +1,7 @@
-"""Native finite-domain (multi-valued) DNNF.
+"""Native finite-domain circuits, compilation, and queries.
 
-This is the representation the classic DNNF diagnosis engines actually
-used: variables carry finite domains (``shutters in {open, closed}``,
-modes with several failure states), circuit leaves are atomic assignments
-``var=value``, and decision OR nodes branch **d ways** — one child per
-domain value.  Compared to the boolean core (:mod:`modenexus.circuit` /
-:mod:`modenexus.compiler`), there is no one-hot encoding: no negative-literal
-bookkeeping leaves, no pairwise exactly-one clauses, and evidence is
-applied by masking value weights directly.
-
-Vocabulary:
-
-* **FD literal**: ``(var, values)`` meaning "the value of ``var`` is in
-  ``values``" — closed under negation (complement against the domain),
-  which is what lets threshold atoms like ``level < 50`` be single
-  literals over quantized ranges.
-* **FD clause**: a disjunction of FD literals, at most one per variable.
-* **Leaf**: an ``mvlit`` — a dense index for one ``(var, value)`` pair;
-  weight vectors are indexed by mvlit, so a variable's weights are a row
-  of a categorical distribution.
-
-The DNNF properties transfer directly: decomposability (AND children over
-disjoint variables), determinism (OR children assert conflicting values
-of a common variable), smoothness (OR children mention the same
-variables; gadgets are ORs over a variable's full domain).  Queries are
-the same semiring sweeps and lazy k-best machinery as the boolean core.
+Variables use direct ``variable=value`` leaves rather than one-hot Boolean
+encodings. Representation and evaluation contracts are in ``CONTRACTS.md``.
 """
 
 from __future__ import annotations
@@ -206,8 +183,7 @@ class FDCircuit:
         )
 
     def is_deterministic(self) -> bool:
-        """Syntactic check: every OR-child pair asserts conflicting values
-        of some common variable (sufficient, not necessary)."""
+        """Run the circuit's conservative syntactic determinism check."""
         asserted = self.asserted_values()
         for i, kind in enumerate(self.kinds):
             if kind != OR:
@@ -224,8 +200,7 @@ class FDCircuit:
         return True
 
     def smooth(self) -> "FDCircuit":
-        """Equivalent smooth circuit mentioning every variable at the root;
-        missing variables get full-domain gadgets ``OR(var=v for v in D)``."""
+        """Return the smoothed form used by counting evaluators."""
         if self.kinds[self.root] == FALSE:
             return FDCircuit(self.spec, [FALSE], [0], [()], 0)
         vs = self.var_sets()
@@ -585,17 +560,10 @@ def compile_fd(
     heuristic: str = "dynamic",
     control: Optional[CompileControl] = None,
 ) -> FDCircuit:
-    """Compile an FD-CNF to a finite-domain decision-DNNF.
+    """Compile an FD-CNF using the selected branching heuristic.
 
-    Same architecture as the boolean compiler — unit propagation,
-    connected-component decomposition (decomposable ANDs), d-way branching
-    (deterministic ORs), component caching — but decisions enumerate a
-    variable's domain directly, so there are no encoding artifacts.
-    ``heuristic``: ``"dynamic"`` (most occurrences, default) or
-    ``"minfill"`` (static, see :func:`minfill_order`); ignored when
-    ``var_order`` is given.
-    ``control`` optionally supplies cooperative timeout/cancellation,
-    node/cache budgets, and progress reporting.
+    ``control`` supplies optional cooperative limits and progress reporting.
+    See ``CONTRACTS.md`` for circuit properties and complexity scope.
     """
     if var_order is None and heuristic == "minfill":
         var_order = minfill_order(cnf)
@@ -727,14 +695,7 @@ def mpe(
 def sample(
     circuit: FDCircuit, log_weights: Sequence[float], rng
 ) -> Optional[Dict[int, int]]:
-    """Draw one exact sample from the distribution the weighted circuit
-    defines: ``P(model) proportional to product of value weights``.
-
-    Top-down: at each OR node a child is chosen with probability
-    proportional to its weighted model mass (one log-sum-exp sweep
-    computes all masses); AND nodes take every child.  Requires a smooth
-    d-DNNF; returns None if the circuit has zero mass.
-    """
+    """Sample one weighted model, or return ``None`` for zero total mass."""
     circuit = _ensure_smooth(circuit)
     vals = log_values(circuit, log_weights)
     if vals[circuit.root] == -math.inf:
@@ -766,25 +727,11 @@ def sample(
 
 
 def dtree_order(cnf: FDCnf, seed: int = 0, restarts: int = 2) -> List[int]:
-    """A static branching order from recursive hypergraph bisection —
-    the MEXEC compiler's recipe (Barrett 2005): clauses are hypergraph
-    nodes, variables are hyperedges weighted by log domain cardinality,
-    and the clause set is recursively split by a balanced min-cut (here
-    FM-style local search with restarts, standing in for
-    Wagner–Klimmek).  Each cut's separator variables are emitted before
-    recursing into the halves, so branching decides separators first and
-    the halves fall apart into independent components.
+    """Return an experimental hypergraph-bisection branching order.
 
-    Returns a full permutation of all FD variables. Variables absent from
-    every clause are appended after the dtree-derived prefix.
-
-    Status: experimental.  Measured (bench families): competitive with
-    the dynamic heuristic but not dominant — ball-seeded cuts win on
-    2-D grids, diameter-seeded cuts win on chains, and minimum cut
-    *weight* imperfectly predicts circuit size, so seed selection by
-    cut weight can pick the worse split.  The open improvement is
-    probe-compile selection (compile a few nodes under each candidate
-    order and keep the smaller); see docs/FUTURE_WORK.md."""
+    ``seed`` and ``restarts`` control the heuristic search. See
+    ``docs/FUTURE_WORK.md`` for benchmark notes.
+    """
     import random as _random
 
     spec = cnf.spec
@@ -1074,11 +1021,7 @@ class FDAtom(Formula):
 
 
 def encode(formulas: Iterable[Formula], cnf: FDCnf) -> None:
-    """Tseitin-encode constraints into ``cnf`` (mutated).  FD literals are
-    closed under negation (domain complement), so ``Not`` never needs an
-    auxiliary; ``And``/``Or`` get hash-consed boolean-domain auxiliaries
-    with biconditional clauses (auxiliaries are functionally determined,
-    so neutral weights leave WMC/MPE untouched)."""
+    """Tseitin-encode formulas into ``cnf`` in place."""
     spec = cnf.spec
     cache: Dict[Tuple, FDLit] = {}
 

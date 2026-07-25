@@ -9,5 +9,6 @@
 - Benchmark-affecting changes: run `python bench/run.py` and
   `python bench/scale.py` and report node counts (they must not change
   for pure-performance work) and timings in the PR.
-- Design context lives in `docs/DESIGN.md`; roadmap in
+- Design context lives in `docs/DESIGN.md`; exactness, invariant, and
+  complexity claims live in `CONTRACTS.md`; roadmap in
   `docs/FUTURE_WORK.md`.

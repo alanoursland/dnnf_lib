@@ -1,22 +1,7 @@
-"""Model-based diagnosis on natively multi-valued compiled circuits.
+"""Model declaration, compilation, diagnosis, and learning APIs.
 
-A system is described as components with discrete *modes* (carrying prior
-probabilities), *observables* (boolean, finite-domain, or quantized
-continuous), and propositional constraints.  The description is compiled
-once (offline) to a smooth finite-domain d-DNNF — leaves are atomic
-assignments like ``valve=stuck_closed`` — and then queried online:
-
-* :meth:`CompiledSystem.diagnoses` — ranked complete system states (MPE
-  semantics), most probable first;
-* :meth:`CompiledSystem.map_diagnoses` — ranked joint mode assignments by
-  **exact summed posterior** (marginal MAP);
-* :meth:`CompiledSystem.mode_posteriors` — exact per-mode marginals;
-* :meth:`CompiledSystem.log_evidence` — ``log P(evidence)``.
-
-Weights live directly on ``(variable, value)`` leaves: a mode's prior is
-the weight of its value, evidence masks the weights of ruled-out values,
-and Tseitin auxiliaries are neutral.  There is no one-hot encoding and no
-exactly-one clauses — finite domains are native (see :mod:`modenexus.fd`).
+Models combine finite-domain modes, observables, priors, and logical
+constraints. Query semantics and exactness scope are in ``CONTRACTS.md``.
 """
 
 from __future__ import annotations
@@ -227,11 +212,11 @@ class SystemModel:
         priors: Optional[Sequence[float]] = None,
         mode: bool = False,
     ) -> FiniteVar:
-        """Declare a finite-domain variable.  With ``mode=True`` (or when
-        ``priors`` are given) it is a component mode: it appears in
-        diagnoses and its priors weight the enumeration.  Priors are finite,
-        non-negative relative weights with a positive total and are
-        normalized automatically."""
+        """Declare a finite-domain variable and optional relative priors.
+
+        ``mode=True`` includes the variable in reported diagnoses. Supplying
+        ``priors`` also marks it as a mode.
+        """
         values = tuple(values)
         if not values:
             raise ValueError(
@@ -280,19 +265,12 @@ class SystemModel:
         self._constraints.append(formula)
 
     def prev(self, name: str) -> FiniteVar:
-        """The previous-timestep copy of mode variable ``name``, for use
-        in **joint transition constraints** — hard relations between
-        consecutive slices that per-variable transition matrices cannot
-        express, e.g.::
+        """Return a previous-step copy for joint transition constraints.
+
+        Example::
 
             m.add(~((m.prev("a") == "ok") & (m.prev("b") == "ok")
                     & (a == "bad") & (b == "bad")))   # no common-cause pair failure
-
-        During tracking, :class:`modenexus.tracking.ModeTracker` conditions
-        the prev variables to each belief particle's modes, so these
-        constraints prune illegal transitions (pruned mass is
-        renormalized: probabilities are conditional on a legal
-        transition).  At t=0 prev variables are unconstrained.
         """
         if name not in self._mode_vars:
             raise KeyError(f"{name!r} is not a mode variable")
@@ -311,11 +289,7 @@ class SystemModel:
         false_positive: float = 0.0,
         false_negative: float = 0.0,
     ) -> Formula:
-        """Declare an observable that noisily reports ``expr``:
-        ``P(name=True | expr) = 1 - false_negative``, ``P(name=True |
-        ~expr) = false_positive``.  Hidden fault-injection variables
-        (``_<name>_fp`` / ``_<name>_fn``) are excluded from reported
-        states."""
+        """Declare a Boolean sensor for ``expr`` with optional error rates."""
         false_positive = _validate_probability(
             name, "false_positive", false_positive
         )
@@ -341,11 +315,11 @@ class SystemModel:
         modes_first: bool = True,
         control: Optional[CompileControl] = None,
     ) -> "CompiledSystem":
-        """Compile to a smooth finite-domain d-DNNF.  With ``modes_first``
-        (default) mode variables are branched above all others, enabling
-        exact marginal MAP (:meth:`CompiledSystem.map_diagnoses`).
-        ``control`` optionally supplies cooperative compilation limits and
-        progress reporting."""
+        """Compile the model for diagnosis queries.
+
+        Keep ``modes_first=True`` when using :meth:`map_diagnoses`.
+        ``control`` supplies optional limits and progress reporting.
+        """
         fd.encode(self._constraints, self.cnf)
         if var_order is None and modes_first:
             var_order = [self.vars[n].fd_var for n in self._mode_vars]
@@ -521,9 +495,10 @@ class CompiledSystem:
     def map_diagnoses(
         self, evidence: Dict[str, EvidenceValue], k: int = 5
     ) -> List[Diagnosis]:
-        """The ``k`` most probable **joint mode assignments** by exact
-        summed posterior (marginal MAP), most probable first.  Requires
-        the default ``modes_first`` compilation."""
+        """Return the top ``k`` joint mode assignments by marginal mass.
+
+        Requires the default ``modes_first`` compilation.
+        """
         log_w = self.log_weights_for(evidence)
         log_z = fd.log_wmc(self.circuit, log_w)
         if log_z == -math.inf:
@@ -563,9 +538,10 @@ class CompiledSystem:
         evidence: Dict[str, EvidenceValue],
         names: Optional[Sequence[str]] = None,
     ) -> Dict[str, Dict[str, float]]:
-        """Exact ``P(var = value | evidence)`` via WMC ratios for the
-        named variables (default: mode variables).  Works for any
-        declared variable, including hidden sensor-noise variables."""
+        """Return posterior rows for named variables.
+
+        Names default to mode variables and may include hidden variables.
+        """
         log_z = self.log_evidence(evidence)
         if log_z == -math.inf:
             raise ValueError("evidence is inconsistent with the model")
@@ -594,7 +570,7 @@ class CompiledSystem:
     def mode_posteriors(
         self, evidence: Dict[str, EvidenceValue]
     ) -> Dict[str, Dict[str, float]]:
-        """Exact ``P(mode = value | evidence)`` via WMC ratios."""
+        """Return posterior rows for all mode variables."""
         return self.posteriors(evidence)
 
     # -- learning -------------------------------------------------------
@@ -605,21 +581,10 @@ class CompiledSystem:
         iterations: int = 25,
         tol: float = 1e-6,
     ) -> List[float]:
-        """Learn value priors for the named variables (default: modes)
-        from partially observed telemetry, by expectation-maximization.
+        """Fit categorical priors from partial observations using EM.
 
-        Each observation is an evidence dict (any subset of variables).
-        E-step: exact posteriors of the fitted variables given each
-        observation under the current priors (WMC ratios on the compiled
-        circuit).  M-step: each fitted variable's prior becomes the
-        average posterior.  This is exact EM for the model class
-        (independent categorical priors + the compiled constraint/noise
-        structure), so the returned per-iteration average log-likelihood
-        is non-decreasing; iteration stops early when it improves by
-        less than ``tol``.
-
-        Priors are updated in place (subsequent queries use them).
-        Returns the log-likelihood trace.
+        Priors are updated in place. The return value is the average
+        log-likelihood trace; ``tol`` controls early stopping.
         """
         if not observations:
             raise ValueError("observations must not be empty")
@@ -676,9 +641,7 @@ class CompiledSystem:
         )
 
     def sample_state(self, rng) -> Dict[str, EvidenceValue]:
-        """Draw one complete system state from the model's current
-        weighted distribution (priors + constraints).  Useful for
-        simulation and for generating synthetic telemetry."""
+        """Draw one complete state using the model's current weights."""
         assignment = fd.sample(
             self.circuit, self.log_weights_for({}), rng
         )
@@ -739,16 +702,11 @@ class CompiledSystem:
         evidence: Dict[str, EvidenceValue],
         candidates: Optional[Sequence[str]] = None,
     ) -> List[Tuple[str, float]]:
-        """Rank unobserved variables by expected reduction in diagnosis
-        uncertainty: for each candidate ``c``, ``VOI(c) = H(modes | e) -
-        E_{v ~ P(c|e)}[H(modes | e, c=v)]`` where H is the sum of
-        per-mode-variable marginal entropies (an upper bound on joint
-        entropy; exact for a single mode variable).  Returns
-        ``[(name, voi), ...]`` best first — "which sensor should I read
-        next."  Candidates default to all unobserved non-hidden,
-        non-mode variables.  Explicit candidates already fixed by
-        ``evidence`` are omitted because their remaining information value
-        is zero."""
+        """Rank candidate observations by expected entropy reduction.
+
+        Candidates default to unobserved public non-mode variables. The
+        result contains ``(name, value)`` pairs, best first.
+        """
         if candidates is None:
             candidates = [
                 n for n in self.vars

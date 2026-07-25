@@ -4,6 +4,14 @@ Notable user-facing changes are recorded here for inclusion in release notes.
 
 ## Unreleased
 
+### Documentation
+
+- Trimmed package docstrings to practical API usage: inputs, outputs, result
+  selection, errors, and resource controls.
+- Moved detailed exactness, representation, normalization, certificate, and
+  complexity claims into `CONTRACTS.md`, including their scope and the
+  distinction between a mathematical contract and independent certification.
+
 ### Fixed — adversarial stress suite
 
 - **Stress GAP-001 — explicit outcome composition:** belief planning now

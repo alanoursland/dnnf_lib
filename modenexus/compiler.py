@@ -1,24 +1,7 @@
-"""Top-down CNF -> decision-DNNF compilation.
+"""Compile Boolean CNF theories into decision-DNNF circuits.
 
-This is an exhaustive DPLL trace compiler in the style of c2d / dsharp / D4:
-
-* **Unit propagation** at every search node; implied literals become AND
-  conjuncts.
-* **Component decomposition**: the residual clause set is split into
-  connected components (clauses connected when they share a variable), each
-  compiled independently and conjoined.  This is what yields decomposable
-  AND nodes.
-* **Branching** on a decision variable inside each component produces
-  ``(v AND C|v) OR (~v AND C|~v)`` decision nodes, which makes every OR node
-  deterministic.
-* **Component caching**: residual clause sets are memoized so identical
-  subproblems reached along different branches share one sub-circuit.  This
-  is the mechanism that produces *small* (not minimal) circuits: circuit
-  size is governed by the branching heuristic, mirroring the search +
-  heuristics approach used in the JPL model-based diagnosis compiler.
-
-The output is a decision-DNNF: decomposable and deterministic, suitable for
-weighted model counting after :meth:`modenexus.circuit.Circuit.smooth`.
+The default compiler uses component-caching search plus a forest fast path.
+See ``CONTRACTS.md`` for structural and complexity properties.
 """
 
 from __future__ import annotations
@@ -111,15 +94,7 @@ def _components(clauses: ClauseSet) -> List[ClauseSet]:
 
 
 def minfill_order(cnf: CNF) -> List[int]:
-    """A static branching order from min-fill elimination on the primal graph.
-
-    Min-fill repeatedly eliminates the variable whose neighborhood needs the
-    fewest fill-in edges to become a clique — a standard treewidth heuristic.
-    Variables eliminated *last* sit in the densest, most central part of the
-    interaction graph, so branching on them *first* tends to disconnect the
-    residual clause set quickly, which is exactly what produces small
-    decomposable circuits.  Returns the reversed elimination order.
-    """
+    """Return a static branching order from primal-graph min-fill."""
     adj: Dict[int, set] = {v: set() for v in range(1, cnf.num_vars + 1)}
     for clause in cnf.clauses:
         cvars = [abs(l) for l in clause]
@@ -174,14 +149,7 @@ def _compile_binary_forest(
     smooth: bool,
     session=None,
 ) -> Optional[Tuple[Circuit, int]]:
-    """Compile an acyclic unary/binary CNF by linear-time tree DP.
-
-    General DPLL remains the fallback.  On a primal forest, however, each
-    subtree has only two boundary contexts (the parent variable's values),
-    so repeatedly rescanning and hashing the residual suffix is unnecessary.
-    The resulting circuit is smooth by construction.  Singleton OR wrappers
-    keep forced subtrees from being flattened and recopied at every ancestor.
-    """
+    """Try the specialized tree-DP compiler for unary/binary forests."""
     if any(len(clause) > 2 for clause in clauses):
         return None
 
@@ -365,19 +333,18 @@ def compile_cnf(
         first); components containing none of them fall back to the
         heuristic.  The order strongly influences circuit size.
     smooth:
-        If True, the result is also smoothed (required for model counting
-        and weighted model counting via semiring evaluation).
+        If true, prepare the result for counting evaluators.
     heuristic:
         ``"dynamic"`` — most-occurrences scoring per component (default);
         ``"minfill"`` — a static order from min-fill elimination on the
         primal graph (see :func:`minfill_order`), usually much better on
         structured instances.  Ignored when ``var_order`` is given.
-        Under the dynamic default, acyclic unary/binary instances use an
-        exact tree-DP fast path whose work and circuit size are linear in
-        the forest.
+        The dynamic default recognizes acyclic unary/binary instances.
     control:
         Optional timeout, cancellation callback, node/cache budgets, and
         progress callback.  Interrupted exceptions carry partial statistics.
+
+    See ``CONTRACTS.md`` for output properties and complexity scope.
     """
     if var_order is None and heuristic == "minfill":
         var_order = minfill_order(cnf)

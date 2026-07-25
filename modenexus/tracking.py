@@ -1,31 +1,8 @@
-"""Temporal mode tracking: filtering a belief over mode assignments.
+"""Temporal filtering over joint mode assignments.
 
-This is the monitoring loop that snapshot diagnosis lacks — the
-Livingstone-style capability: modes evolve stochastically between
-timesteps, observations arrive each step, and the tracker maintains a
-belief over joint mode assignments.
-
-Semantics.  Mode variables evolve independently between steps with
-per-variable transition matrices ``T[name][from_value][to_value]``; the
-system's constraints and observation structure are the compiled circuit,
-evaluated fresh each step.  One filtering step from belief ``B_t``:
-
-    B_{t+1}(M') proportional-to
-        sum_{M in beam} B_t(M) * [ sum over non-mode vars of
-            product of literal weights, with mode priors set to
-            T[.][M[.]][.] and evidence e_{t+1} applied, at modes M' ]
-
-The inner bracket is exactly a marginal-MAP-style summed mass, so each
-step is |beam| conditioned circuit sweeps plus lazy ranked enumeration —
-no new inference machinery.
-
-Exactness.  Belief propagation is **beam-limited**: only the ``beam``
-most probable mode assignments survive each step, and each survivor
-proposes its ``expand`` best successors.  When ``beam`` and ``expand``
-cover the full joint mode space the recursion is the exact HMM forward
-algorithm (verified in tests); with smaller beams it is the standard
-best-first approximation used by tracking diagnosis engines, and mass
-outside the beam is dropped (renormalized away).
+The tracker combines transition rows, model constraints, and observations
+with configurable beam and expansion resources. See ``CONTRACTS.md`` for
+exactness and retained-mass semantics.
 """
 
 from __future__ import annotations
@@ -43,22 +20,10 @@ Transitions = Dict[str, Dict[str, Dict[str, float]]]
 
 
 class TrackedBelief(list):
-    """Normalized tracker belief carrying approximation metadata.
+    """List-compatible belief with exactness and retained-mass metadata.
 
-    This remains a ``list`` for compatibility with existing consumers, but
-    plain ``list`` copy paths (``list(belief)``, ``belief[:]``,
-    ``iter(belief)`` unpacking) discard a subclass's attributes silently,
-    which would let a copy claim an exactness/mass guarantee that
-    :meth:`plan_belief` never actually checked. ``copy()`` and slicing are
-    therefore overridden to carry the metadata forward, and any in-place
-    mutation (``__setitem__``, ``append``, ``extend``, ``clear``, ``sort``,
-    ``pop``, ``remove``, ``insert``, ``__iadd__``) invalidates it instead of
-    silently reporting stale exactness or mass.  Use ``list(belief)`` when a
-    metadata-free plain list is explicitly wanted; it still loses the
-    attributes, but that is now the only way to get an unscoped copy.
-    ``retained_probability_mass`` is a lower bound relative to the exact
-    posterior when known; ``None`` means no nontrivial mass certificate is
-    available.
+    Copies and slices retain metadata; in-place mutation invalidates it.
+    Use ``list(belief)`` for a metadata-free list.
     """
 
     def __init__(
@@ -246,41 +211,20 @@ class ModeTracker:
     system:
         A compiled system (``modes_first`` compilation, the default).
     transitions:
-        ``{mode_var: {from_value: {to_value: prob}}}``.  Mode variables
-        without an entry are *resampled from their static priors* each
-        step (i.e. treated as memoryless).  Rows should sum to 1.
+        ``{mode_var: {from_value: {to_value: probability}}}``.
     transition_fn:
-        Optional callable ``prev_modes -> {mode_var: {value: prob}}``
-        giving each variable's next-value distribution as a function of
-        the **entire** previous joint mode assignment — this is how
-        correlated dynamics are expressed (e.g. a pump failure raising
-        the valve's failure rate).  Variables missing from its result
-        fall back to ``transitions`` (then to static priors).  A per-step
-        ``transitions`` override passed to :meth:`step` takes precedence
-        over both.
+        Optional ``prev_modes -> {mode_var: {value: probability}}`` callback.
     beam:
         Maximum number of mode assignments kept in the belief.
     expand:
         Successors proposed per belief particle per step (defaults to
         ``beam``).
     exact:
-        Size ``beam`` and ``expand`` to the full Cartesian product of mode
-        domains.  This gives exact filtering while keeping the exponential
-        state-space requirement explicit in ``joint_state_count``.
+        Configure resources from the full joint state count.
     max_exact_states:
-        Safety limit for ``exact=True``.  Raise it deliberately when the
-        computed state-space size is acceptable for the deployment.
+        Maximum joint-state count accepted by ``exact=True``.
     retain_history:
-        Retain successful step evidence and per-step transition overrides so
-        :meth:`refine` can rebuild the posterior with a larger beam. History
-        retention is opt-in because evidence volume can grow without bound.
-
-    ``belief()`` returns a list-compatible :class:`TrackedBelief` carrying
-    exactness and retained-mass metadata for downstream certificate
-    composition. ``last_step_info`` reports whether expansion or final beam
-    selection truncated an update. Retained posterior mass is reported only
-    when the predecessor belief was exact and all successor expansions were
-    enumerated; otherwise it is conservatively unknown.
+        Retain successful inputs for later :meth:`refine` calls.
     """
 
     def __init__(
@@ -369,18 +313,11 @@ class ModeTracker:
         evidence: Dict[str, EvidenceValue],
         transitions: Optional[Transitions] = None,
     ) -> List[Tuple[Dict[str, str], float]]:
-        """Advance one timestep with the given observations; returns the
-        updated (normalized) belief as ``[(modes, prob), ...]``, most
-        probable first.  Raises ValueError if the evidence is inconsistent
-        with every tracked trajectory (belief collapse — enlarge the beam
-        or check the model).
+        """Advance one timestep and return the updated belief.
 
-        ``transitions``, if given, overrides the tracker's transition
-        matrices *for this step only* (per mode variable; unlisted
-        variables keep their defaults).  This is how command-conditioned
-        dynamics work: pass the matrix matching what was commanded this
-        tick — e.g. a valve only risks transitioning to ``stuck_open``
-        on a step where it was actually commanded to open."""
+        ``transitions`` overrides configured rows for this step. Inconsistent
+        evidence raises :class:`ValueError`.
+        """
         step_transitions = dict(self.transitions)
         if transitions:
             step_transitions.update(transitions)
@@ -512,13 +449,7 @@ class ModeTracker:
         max_exact_states: int = 100_000,
         retain_history: bool = True,
     ) -> "ModeTracker":
-        """Build a tracker and replay an explicit retained history.
-
-        Only successful steps belong in ``history``. The replay uses the
-        supplied base transitions and transition function, plus the
-        per-step overrides captured in each :class:`TrackingHistoryStep`.
-        A stateful ``transition_fn`` must itself be replay-safe.
-        """
+        """Build a tracker by replaying successful history entries."""
         tracker = cls(
             system,
             transitions=deepcopy(transitions),
@@ -565,14 +496,7 @@ class ModeTracker:
         exact: bool = False,
         max_exact_states: int = 100_000,
     ) -> "ModeTracker":
-        """Return a freshly replayed tracker with greater resources.
-
-        Refinement never mutates this tracker and never pretends discarded
-        trajectories can be recovered in place. For a tracker that has
-        advanced, ``retain_history=True`` must have been selected at
-        construction. With no explicit target, both resources double up to
-        the complete joint state count.
-        """
+        """Replay retained history into a new tracker with larger resources."""
         if self.t and not self.retain_history:
             raise RuntimeError(
                 "tracker refinement requires retain_history=True before "
@@ -647,14 +571,7 @@ class ModeTracker:
         exact_fallback: bool = True,
         max_exact_states: int = 100_000,
     ) -> TrackingRefinementResult:
-        """Replay at increasing resources until ``accept(evaluate(...))``.
-
-        The current belief is evaluated first without replay. By default,
-        the beam grows geometrically and the last permitted attempt is exact.
-        Explicit ``beams`` make the resource schedule fully deterministic.
-        The returned attempts expose replay work and, when the evaluation
-        provides them, ``certificate_scope`` and ``maximum_regret``.
-        """
+        """Evaluate and replay larger beams until ``accept`` succeeds."""
         if growth_factor <= 1.0:
             raise ValueError("growth_factor must be greater than 1")
         limit = self.joint_state_count if max_beam is None else max_beam
