@@ -286,6 +286,26 @@ already satisfied. When noisy telemetry mixes satisfied and unresolved
 states into one posterior, only unresolved posterior mass is charged for the
 continuation action; goal probability retains both portions.
 
+For real execution, create a stateful runner from a conditional or one-step
+belief planning result:
+
+```python
+execution = result.execution()
+step = execution.advance(
+    outcome={"battery": "ready"},
+    observation={"reserve_meter": True},
+)
+next_belief = step.posterior
+regime_marginals = step.posterior_marginals()
+```
+
+The runner applies outcome and observation evidence with the same callbacks
+used for planning, routes the policy, stops on physical success, and reports
+the updated posterior and accumulated action cost. It updates posterior
+belief even on terminal paths, where no observation branch was constructed.
+For robust results, pass `outcome_scenario="name"` (or an explicit
+`outcome_model`) to select the physical model used during execution.
+
 When the input is a `TrackedBelief`, the planner composes tracker uncertainty
 into separate end-to-end action bounds. Results preserve the policy-only
 certificate, report certificate scope, and refuse to present a beam-only

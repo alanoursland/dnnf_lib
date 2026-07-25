@@ -348,7 +348,12 @@ class BeliefActionEvaluation:
 
 @dataclass(frozen=True)
 class BeliefPlanResult:
-    """Best one-step action and all evaluated alternatives."""
+    """Best one-step action and all evaluated alternatives.
+
+    When planning used an explicit ``outcome_model``, :meth:`execution`
+    creates a one-action execution state that updates the latent belief from
+    the observed physical outcome.
+    """
 
     action: Dict[str, object]
     expected_goal_probability: float
@@ -358,11 +363,72 @@ class BeliefPlanResult:
     goal_probability_constraint: Optional[float] = None
     feasible: Optional[bool] = None
     best_achievable_goal_probability: Optional[float] = None
+    _execution_context: Optional[
+        "_BeliefPolicyExecutionContext"
+    ] = field(default=None, repr=False, compare=False)
+    _execution_certificate_scope: str = field(
+        default="caller-supplied-belief",
+        repr=False,
+        compare=False,
+    )
 
     @property
     def commands(self) -> List[Dict[str, object]]:
         """Single-command list for symmetry with :class:`PlanResult`."""
         return [dict(self.action)]
+
+    def execution(
+        self,
+        belief=None,
+        *,
+        outcome_model: Optional[Callable] = None,
+    ) -> "BeliefPolicyExecution":
+        """Create a one-action state that updates belief from real outcome.
+
+        The explicit outcome callback supplied during planning is reused by
+        default. Callers may replace it for execution. A result planned only
+        from compiled transition weights has no physical outcome callback
+        and therefore requires ``outcome_model`` here.
+        """
+        context = self._execution_context
+        if context is None:
+            raise RuntimeError(
+                "this result does not carry belief execution context"
+            )
+        selected_model = (
+            context.outcome_model
+            if outcome_model is None
+            else outcome_model
+        )
+        if selected_model is None:
+            raise RuntimeError(
+                "belief execution requires the planning outcome_model "
+                "or an explicit outcome_model"
+            )
+        policy = BeliefPolicyNode(
+            action=dict(self.action),
+            immediate_action_cost=self.action_cost,
+            expected_goal_probability=self.expected_goal_probability,
+            expected_action_cost=self.action_cost,
+            expected_utility=self.expected_utility,
+            utility_upper_bound=self.expected_utility,
+            branches=(),
+            fallback_policy=None,
+            retained_observation_probability=1.0,
+            discarded_observation_probability=0.0,
+            goal_probability_upper_bound=self.expected_goal_probability,
+        )
+        return BeliefPolicyExecution(
+            policy=policy,
+            belief=(
+                context.initial_belief if belief is None else belief
+            ),
+            outcome_model=selected_model,
+            observation_model=None,
+            goal_probability=context.goal_probability,
+            action_cost=context.action_cost,
+            certificate_scope=self._execution_certificate_scope,
+        )
 
 
 @dataclass(frozen=True)
@@ -650,7 +716,7 @@ class _BeliefPolicyExecutionContext:
     initial_belief: Tuple[Tuple[Mapping[str, object], float], ...]
     outcome_model: Optional[Callable]
     outcome_scenarios: Tuple[Tuple[str, Callable], ...]
-    observation_model: Callable
+    observation_model: Optional[Callable]
     goal_probability: Callable
     action_cost: Callable
 
@@ -717,6 +783,18 @@ class BeliefPolicyExecution:
     @property
     def terminal(self) -> bool:
         return self._terminal
+
+    @property
+    def requires_observation(self) -> bool:
+        """Whether the current action has an observation continuation."""
+        return bool(
+            not self._terminal
+            and self._policy is not None
+            and (
+                self._policy.branches
+                or self._policy.fallback_policy is not None
+            )
+        )
 
     def _goal_reached(self) -> bool:
         return bool(self._belief) and all(
@@ -809,6 +887,10 @@ class BeliefPolicyExecution:
         particles = self._normalize_particles(particles)
 
         if observation is not None:
+            if self._observation_model is None:
+                raise ValueError(
+                    "this execution result has no observation model"
+                )
             generated = []
             schema = set()
             for state, state_mass in particles:
@@ -1516,6 +1598,8 @@ class CompiledPlanner:
         observation callback they return
         :class:`ConditionalBeliefPolicyResult`, whose future actions branch
         on the observations produced after each stochastic outcome.
+        One-step and conditional results expose ``execution()`` to consume
+        real physical evidence and carry the updated belief into replanning.
 
         ``belief`` has the shape returned by
         :meth:`modenexus.ModeTracker.belief`: ``[(joint_state, mass), ...]``.
@@ -3407,6 +3491,16 @@ class CompiledPlanner:
             }
         else:
             best = evaluations[0]
+        if belief_exact is True:
+            execution_certificate_scope = "exact-tracker-belief"
+        elif belief_exact is False:
+            execution_certificate_scope = (
+                "tracked-belief-mass-bound"
+                if supplied_retained_mass is not None
+                else "tracked-belief-mass-unknown"
+            )
+        else:
+            execution_certificate_scope = "caller-supplied-belief"
         session.finish()
         return BeliefPlanResult(
             action=dict(best.action),
@@ -3414,6 +3508,31 @@ class CompiledPlanner:
             action_cost=best.action_cost,
             expected_utility=best.expected_utility,
             evaluations=tuple(evaluations),
+            _execution_context=_BeliefPolicyExecutionContext(
+                initial_belief=tuple(
+                    (dict(state), probability)
+                    for state, probability in checked_states
+                ),
+                outcome_model=outcome_model,
+                outcome_scenarios=(),
+                observation_model=None,
+                goal_probability=(
+                    lambda state, step: conditional_goal_probability(
+                        step_evidence(
+                            state,
+                            step,
+                            include_observables=True,
+                        ),
+                        step,
+                    )
+                ),
+                action_cost=(
+                    lambda command: action_cost(
+                        command[command_name], command
+                    )
+                ),
+            ),
+            _execution_certificate_scope=execution_certificate_scope,
             **action_extras,
         )
 

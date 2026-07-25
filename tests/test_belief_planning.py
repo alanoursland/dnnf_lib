@@ -877,7 +877,7 @@ def test_policy_execution_updates_terminal_hidden_posterior():
     planner = Planner()
     planner.mode("battery", ("low", "ready"))
     planner.mode("regime", ("good", "bad"), priors=(0.5, 0.5))
-    planner.command("action", ("charge",))
+    planner.command("action", ("none", "charge"))
     planner.observable("done")
     planner.behavior(
         lambda value: iff(
@@ -908,6 +908,7 @@ def test_policy_execution_updates_terminal_hidden_posterior():
         observation_model=lambda state, command: {
             "meter": state["battery"]
         },
+        actions=("charge",),
         action_costs={"charge": 0.1},
     )
     execution = result.execution()
@@ -926,18 +927,68 @@ def test_policy_execution_updates_terminal_hidden_posterior():
         step.posterior[0][0]["regime"] = "bad"
 
 
-def test_robust_policy_execution_requires_realized_scenario():
-    def outcomes(state, command):
-        return [({"mode": "goal"}, 1.0)]
+def test_one_step_execution_updates_terminal_hidden_posterior():
+    planner = Planner()
+    planner.mode("battery", ("low", "ready"))
+    planner.mode("regime", ("good", "bad"), priors=(0.5, 0.5))
+    planner.command("action", ("none", "charge"))
+    planner.observable("done")
+    planner.behavior(
+        lambda value: iff(
+            value["done"] == True,
+            value["battery"] == "ready",
+        )
+    )
+    planner.transition(
+        "battery", "low", "ready", command=("action", "charge")
+    )
+    compiled = planner.compile(1)
 
+    def outcomes(state, command):
+        success = 0.9 if state["regime"] == "good" else 0.2
+        return [
+            ({"battery": "ready"}, success),
+            ({}, 1.0 - success),
+        ]
+
+    result = compiled.plan_belief(
+        belief=[
+            ({"battery": "low", "regime": "good"}, 0.5),
+            ({"battery": "low", "regime": "bad"}, 0.5),
+        ],
+        target={"done": True},
+        outcome_model=outcomes,
+        actions=("charge",),
+        action_costs={"charge": 0.1},
+    )
+    execution = result.execution()
+    assert execution.action == {"action": "charge"}
+    assert not execution.requires_observation
+    step = execution.advance(outcome={"battery": "ready"})
+
+    assert step.goal_reached
+    assert step.terminal
+    assert step.route.kind == "terminal"
+    assert step.accumulated_cost == pytest.approx(0.1)
+    assert step.posterior_marginals()["regime"] == pytest.approx(
+        {"good": 0.9 / 1.1, "bad": 0.2 / 1.1}
+    )
+    assert execution.action is None
+
+
+def test_robust_policy_execution_requires_realized_scenario():
     result = reliability_planner(horizon=2).plan_belief(
         belief=[({"mode": "bad"}, 1.0)],
         target={"done": True},
-        outcome_scenarios={"one": outcomes, "two": outcomes},
+        outcome_scenarios={
+            "one": reliability_outcomes,
+            "two": reliability_outcomes,
+        },
         robust_objective="maximin",
         robust_weight_resolution=2,
         max_robust_candidates=1,
         observation_model=lambda state, command: dict(state),
+        actions=("sure",),
     )
     with pytest.raises(ValueError, match="requires outcome_scenario"):
         result.execution()
