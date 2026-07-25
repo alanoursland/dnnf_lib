@@ -10,6 +10,7 @@ import math
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .circuit import AND, FALSE, LIT, OR, TRUE, Circuit, lit_index
+from .invariants import ModeNexusInvariantError
 
 Derivation = Tuple[float, Tuple[int, ...]]  # (cost, sorted literal tuple)
 
@@ -66,7 +67,10 @@ class _NodeStream:
         if self._kind == OR:
             ci, idx = state
             d = self._children[ci].get(idx)
-            assert d is not None
+            if d is None:
+                raise ModeNexusInvariantError(
+                    "ranked OR heap referenced a missing child derivation"
+                )
             self.items.append(d)
             nxt = self._children[ci].get(idx + 1)
             if nxt is not None:
@@ -75,7 +79,13 @@ class _NodeStream:
             vec = state
             lits: List[int] = []
             for child, idx in zip(self._children, vec):
-                lits.extend(child.get(idx)[1])
+                d = child.get(idx)
+                if d is None:
+                    raise ModeNexusInvariantError(
+                        "ranked AND heap referenced a missing child "
+                        "derivation"
+                    )
+                lits.extend(d[1])
             self.items.append((cost, tuple(sorted(lits, key=abs))))
             for pos in range(len(vec)):
                 nxt = list(vec)

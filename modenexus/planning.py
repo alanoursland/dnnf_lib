@@ -20,6 +20,7 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    cast,
 )
 
 from . import fd
@@ -85,9 +86,7 @@ def _immutable_value(value: object) -> object:
 def _immutable_mapping(
     value: Mapping[str, object],
 ) -> Mapping[str, object]:
-    frozen = _immutable_value(value)
-    assert isinstance(frozen, Mapping)
-    return frozen
+    return cast(Mapping[str, object], _immutable_value(value))
 
 
 def _check_finite_result(
