@@ -40,12 +40,29 @@ Notable user-facing changes are recorded here for inclusion in release notes.
 - **GAP-018 — policy observation routing:** `BeliefPolicyNode.continuation()`
   now projects the supplied observation onto the node's observation schema,
   so telemetry mappings carrying extra sensor fields match their retained
-  branch instead of silently routing to the pruned-observation fallback.
-  Mappings missing schema keys raise `KeyError` — a shape mismatch is an
-  integration error, not a low-probability observation. New
+  branch instead of silently routing to the pruned-observation fallback. New
   `BeliefPolicyNode.observation_schema` exposes the required keys, and
   `route()` returns a structured `BeliefPolicyRouting` reporting exact,
   fallback, terminal, or unmatched routing with the projected observation.
+- **GAP-021 — certificate-bearing policy immutability:** action,
+  observation, posterior-state, contributing-observation, projected-routing,
+  and certificate mappings reachable from a conditional result are now
+  recursively immutable. Public convenience properties still return mutable
+  defensive copies for execution.
+- **GAP-022 — heterogeneous observation routing:** policy routing now treats
+  key absence as part of observation identity. Callback branches with
+  different key sets route exactly as returned, unrelated telemetry fields
+  are ignored, and a present `None` remains distinct from an absent key.
+- **GAP-023 — branch-constraint certification:** every active whole-policy
+  and per-branch reliability constraint now participates in
+  `constraint_certification`; branch-only constraints no longer receive a
+  missing status, and an infeasible branch constraint cannot be reported
+  certified feasible.
+- **GAP-024 — branch safety under observation pruning:** a per-branch floor
+  is no longer certified feasible after raw observations are merged into a
+  fallback posterior. Pruned branch certificates are `indeterminate` unless
+  exact, unaggregated analysis certifies the result; exact raw-branch
+  infeasibility remains `certified-infeasible`.
 
 ### Added
 
@@ -161,6 +178,12 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   tracker-retained mass into certified-feasible, certified-infeasible, or
   indeterminate, scoped like the utility certificates. The same floor works
   on the one-step and open-loop paths.
+- **GAP-025 — frontier provisioning diagnostics:** constrained conditional
+  results and `PlanningStats` now expose generated and retained frontier
+  points, largest pre-cap frontier, truncated-node count, saturation by
+  depth and root action, and a conservative feasible-utility upper bound and
+  optimality gap. Callers can measure progress as `max_frontier_points`
+  increases without weakening exact feasibility endpoints.
 
 ### Documentation and examples
 
@@ -193,15 +216,18 @@ Notable user-facing changes are recorded here for inclusion in release notes.
 - Updated the microgrid risk-constraint experiment to exercise the public
   `min_goal_probability` chance constraint, including infeasibility
   reporting for an unreachable floor.
+- Updated the mutation, heterogeneous-observation, branch-constraint,
+  branch-pruning, and islanded-frontier experiments to validate GAP-021
+  through GAP-025 and report the new diagnostic surface.
 - Updated the black-box edge-case experiment and archived GAP-001 through
-  GAP-020 under `modenexus_apps/gaps/fixed`.
+  GAP-025 under `modenexus_apps/gaps/fixed`.
 
 ### Verification
 
-- ModeNexus test suite: **381 passed, 1 skipped** (PyTorch available in the
-  verification environment; the single skip needs an external c2d binary).
+- ModeNexus test suite: **344 passed, 7 skipped**.
 - Black-box API edge-case checks: all fixed cases report `OK`.
-- Companion applications: all **53 tests passed**, including the updated
+- Companion applications: all **59 non-PyTorch tests passed**, including the updated
   belief-metadata, validation-edge, operational-control,
   observation-routing, risk-constraint, and branch-explainability
-  reproducers asserting the fixed behavior.
+  reproducers asserting the fixed behavior. The optional PyTorch batch check
+  was not run because PyTorch was unavailable in this verification runtime.

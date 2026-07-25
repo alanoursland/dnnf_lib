@@ -603,6 +603,7 @@ def test_branch_reliability_floor_is_stricter():
         min_branch_goal_probability=0.75, **staged_arguments()
     )
     assert relaxed.feasible
+    assert relaxed.constraint_certification == "certified-feasible"
     assert relaxed.branch_goal_probability_constraint == 0.75
     for branch in relaxed.policy.branches:
         assert branch.expected_goal_probability >= 0.75 - 1e-9
@@ -613,19 +614,60 @@ def test_branch_reliability_floor_is_stricter():
         min_branch_goal_probability=0.9, **staged_arguments()
     )
     assert not strict.feasible
+    assert strict.constraint_certification == "certified-infeasible"
     assert strict.best_achievable_goal_probability == pytest.approx(0.9)
 
 
 def test_frontier_truncation_keeps_feasibility_exact():
     planner = staged_repair_planner()
+    snapshots = []
     result = planner.plan_belief(
         min_goal_probability=0.9,
         max_frontier_points=2,
+        control=PlanControl(
+            progress=snapshots.append,
+            progress_interval=0.0,
+        ),
         **staged_arguments(),
     )
     assert result.feasible
     assert result.expected_goal_probability >= 0.9 - 1e-9
     assert result.constraint_optimality == "frontier-truncated"
+    assert result.generated_frontier_points >= (
+        result.retained_frontier_points
+    )
+    assert result.maximum_frontier_size > 2
+    assert result.truncated_frontier_nodes > 0
+    assert result.frontier_saturation_by_depth
+    assert result.frontier_saturated_root_actions
+    assert result.constraint_utility_upper_bound >= (
+        result.expected_utility
+    )
+    assert result.constraint_utility_optimality_gap == pytest.approx(
+        result.constraint_utility_upper_bound - result.expected_utility
+    )
+    final = snapshots[-1]
+    assert final.complete
+    assert final.generated_frontier_points == (
+        result.generated_frontier_points
+    )
+    assert final.retained_frontier_points == (
+        result.retained_frontier_points
+    )
+    assert final.maximum_frontier_size == result.maximum_frontier_size
+    assert final.truncated_frontier_nodes == (
+        result.truncated_frontier_nodes
+    )
+
+
+def test_pruned_branch_floor_certificate_is_indeterminate():
+    result = staged_repair_planner().plan_belief(
+        min_branch_goal_probability=0.75,
+        max_observations_per_node=1,
+        **staged_arguments(),
+    )
+    assert result.pruned_observation_branch_count > 0
+    assert result.constraint_certification == "indeterminate"
 
 
 def test_reliability_certification_composes_tracker_scope():
@@ -807,7 +849,7 @@ def test_plan_belief_reports_progress_and_final_stats():
     )
 
 
-def test_policy_routing_projects_superset_and_rejects_partial():
+def test_policy_routing_projects_superset_and_falls_back_for_partial():
     def observations(state, command):
         del command
         if state["mode"] == "goal":
@@ -842,14 +884,69 @@ def test_policy_routing_projects_superset_and_rejects_partial():
     assert routed.policy is branch.policy
     assert root.continuation(superset) is branch.policy
 
-    with pytest.raises(KeyError, match="missing planner schema keys"):
-        root.route({"unrelated_telemetry": 42.0})
-    with pytest.raises(KeyError, match="missing planner schema keys"):
-        root.continuation({})
+    partial = root.route({"unrelated_telemetry": 42.0})
+    assert partial.kind == "fallback"
+    assert root.continuation({}) is root.fallback_policy
 
     fallback = root.route({"signal": "not-a-known-reading"})
     assert fallback.kind == "fallback"
     assert fallback.policy is root.fallback_policy
+
+
+def test_policy_routing_preserves_heterogeneous_observation_identity():
+    def observations(state, command):
+        del state, command
+        return [
+            ({"breaker_signal": True}, 0.5),
+            ({"generator_signal": True}, 0.5),
+        ]
+
+    result = repair_planner(horizon=2).plan_belief(
+        belief=[({"mode": "a"}, 1.0)],
+        target={"done": True},
+        outcome_model=repair_outcomes,
+        observation_model=observations,
+    )
+    root = result.policy
+    assert root.observation_schema == (
+        "breaker_signal",
+        "generator_signal",
+    )
+    for branch in root.branches:
+        routed = root.route(branch.observation)
+        assert routed.kind == "exact"
+        assert routed.branch is branch
+        with_extra = dict(branch.observation)
+        with_extra["unrelated"] = 1
+        assert root.route(with_extra).branch is branch
+    assert root.route(
+        {
+            "breaker_signal": True,
+            "generator_signal": None,
+        }
+    ).kind == "unmatched"
+
+
+def test_certified_policy_tree_is_deeply_immutable():
+    result = repair_planner(horizon=2).plan_belief(
+        belief=[({"mode": "a"}, 0.5), ({"mode": "b"}, 0.5)],
+        target={"done": True},
+        outcome_model=repair_outcomes,
+        observation_model=lambda state, command: dict(state),
+    )
+    branch = result.policy.branches[0]
+    with pytest.raises(TypeError):
+        result.policy.action["action"] = "wait"
+    with pytest.raises(TypeError):
+        branch.observation["mode"] = "other"
+    with pytest.raises(TypeError):
+        branch.posterior[0][0]["mode"] = "other"
+    with pytest.raises(TypeError):
+        result.action_certificates[0].action["action"] = "wait"
+
+    action_copy = result.action
+    action_copy["action"] = "wait"
+    assert result.action != action_copy
 
 
 def test_policy_routing_reports_terminal_and_unmatched():

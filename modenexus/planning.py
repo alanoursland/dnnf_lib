@@ -28,7 +28,16 @@ import math
 import time
 from dataclasses import dataclass
 from itertools import product
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from . import fd
 from .compile_control import CompileControl
@@ -36,9 +45,69 @@ from .diagnosis import SystemModel, _normalize_categorical_weights
 from .formula import Formula
 
 
+class _ImmutableMapping(Mapping[str, object]):
+    """Small recursively immutable mapping used by certified results."""
+
+    __slots__ = ("_items",)
+
+    def __init__(self, value: Mapping[str, object]):
+        self._items = tuple(
+            (key, _immutable_value(item)) for key, item in value.items()
+        )
+
+    def __getitem__(self, key: str) -> object:
+        for candidate, value in self._items:
+            if candidate == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return (key for key, _ in self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __repr__(self) -> str:
+        return repr(dict(self._items))
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Mapping):
+            return dict(self.items()) == dict(other.items())
+        return False
+
+    def copy(self) -> Dict[str, object]:
+        """Return a mutable shallow copy for execution integrations."""
+        return dict(self._items)
+
+
+def _immutable_value(value: object) -> object:
+    if isinstance(value, _ImmutableMapping):
+        return value
+    if isinstance(value, Mapping):
+        return _ImmutableMapping(value)
+    if isinstance(value, (list, tuple)):
+        return tuple(_immutable_value(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(_immutable_value(item) for item in value)
+    return value
+
+
+def _immutable_mapping(
+    value: Mapping[str, object],
+) -> Mapping[str, object]:
+    frozen = _immutable_value(value)
+    assert isinstance(frozen, Mapping)
+    return frozen
+
+
 @dataclass(frozen=True)
 class PlanningStats:
-    """Snapshot of an in-progress or completed belief-planning search."""
+    """Snapshot of an in-progress or completed belief-planning search.
+
+    Chance-constrained searches additionally report aggregate frontier
+    generation/retention counts, the largest nondominated pre-cap frontier,
+    truncated-node count, and saturation grouped by depth and root action.
+    """
 
     elapsed_seconds: float
     policy_nodes: int
@@ -46,6 +115,12 @@ class PlanningStats:
     observation_branches: int
     best_action: Optional[Dict[str, object]]
     best_expected_utility: Optional[float]
+    generated_frontier_points: int = 0
+    retained_frontier_points: int = 0
+    maximum_frontier_size: int = 0
+    truncated_frontier_nodes: int = 0
+    frontier_saturation_by_depth: Tuple[Tuple[int, int], ...] = ()
+    frontier_saturated_root_actions: Tuple[object, ...] = ()
     complete: bool = False
 
 
@@ -142,6 +217,14 @@ class _PlanSession:
         self.policy_nodes = 0
         self.outcome_branches = 0
         self.observation_branches = 0
+        self.frontier_generated_points = 0
+        self.frontier_retained_points = 0
+        self.frontier_maximum_size = 0
+        self.frontier_truncated_nodes = 0
+        self.frontier_saturation_by_depth: Tuple[
+            Tuple[int, int], ...
+        ] = ()
+        self.frontier_saturated_root_actions: Tuple[object, ...] = ()
         self.best_action: Optional[Dict[str, object]] = None
         self.best_expected_utility: Optional[float] = None
 
@@ -163,6 +246,16 @@ class _PlanSession:
             observation_branches=self.observation_branches,
             best_action=self.best_action,
             best_expected_utility=self.best_expected_utility,
+            generated_frontier_points=self.frontier_generated_points,
+            retained_frontier_points=self.frontier_retained_points,
+            maximum_frontier_size=self.frontier_maximum_size,
+            truncated_frontier_nodes=self.frontier_truncated_nodes,
+            frontier_saturation_by_depth=(
+                self.frontier_saturation_by_depth
+            ),
+            frontier_saturated_root_actions=(
+                self.frontier_saturated_root_actions
+            ),
             complete=complete,
         )
 
@@ -320,17 +413,40 @@ class BeliefPolicyBranch:
     re-derive outcome propagation and Bayes weighting themselves.  For the
     aggregated pruned-observation fallback branch on
     :attr:`BeliefPolicyNode.fallback_policy`, ``contributing_observations``
-    lists the pruned observations merged into that posterior.
+    lists the pruned observations merged into that posterior. Observation,
+    posterior-state, and contributing-observation mappings are recursively
+    immutable so execution cannot diverge from the certified snapshot.
     """
 
-    observation: Dict[str, object]
+    observation: Mapping[str, object]
     probability: float
     expected_goal_probability: float
     expected_action_cost: float
     expected_utility: float
     policy: Optional["BeliefPolicyNode"]
-    posterior: Tuple[Tuple[Dict[str, object], float], ...] = ()
-    contributing_observations: Tuple[Dict[str, object], ...] = ()
+    posterior: Tuple[Tuple[Mapping[str, object], float], ...] = ()
+    contributing_observations: Tuple[Mapping[str, object], ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "observation", _immutable_mapping(self.observation)
+        )
+        object.__setattr__(
+            self,
+            "posterior",
+            tuple(
+                (_immutable_mapping(state), probability)
+                for state, probability in self.posterior
+            ),
+        )
+        object.__setattr__(
+            self,
+            "contributing_observations",
+            tuple(
+                _immutable_mapping(observation)
+                for observation in self.contributing_observations
+            ),
+        )
 
     def posterior_marginals(self) -> Dict[str, Dict[object, float]]:
         """Per-variable marginals of :attr:`posterior`."""
@@ -364,7 +480,14 @@ class BeliefPolicyRouting:
     kind: str
     policy: Optional["BeliefPolicyNode"]
     branch: Optional["BeliefPolicyBranch"]
-    projected_observation: Dict[str, object]
+    projected_observation: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "projected_observation",
+            _immutable_mapping(self.projected_observation),
+        )
 
 
 @dataclass(frozen=True)
@@ -375,10 +498,13 @@ class BeliefPolicyNode:
     pruning; ``fallback_branch`` carries that fallback's aggregate posterior
     and the pruned observations contributing to it.
     ``retained_observation_probability`` includes all later levels;
-    ``discarded_observation_probability`` is local to this node.
+    ``discarded_observation_probability`` is local to this node. The action
+    mapping and every mapping reachable through the policy tree are
+    recursively immutable; use ``dict(node.action)`` for a mutable execution
+    copy.
     """
 
-    action: Dict[str, object]
+    action: Mapping[str, object]
     immediate_action_cost: float
     expected_goal_probability: float
     expected_action_cost: float
@@ -391,12 +517,17 @@ class BeliefPolicyNode:
     fallback_branch: Optional[BeliefPolicyBranch] = None
     goal_probability_upper_bound: float = 1.0
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "action", _immutable_mapping(self.action))
+
     @property
     def observation_schema(self) -> Tuple[str, ...]:
-        """Sorted keys this node's retained branch observations use.
+        """Union of keys this node's retained branch observations use.
 
-        This is the planner-side schema an execution-time telemetry mapping
-        must cover to be routable; extra keys are ignored by :meth:`route`.
+        Branches may use heterogeneous key sets. :meth:`route` intersects
+        execution-time telemetry with this union, so unrelated extra keys
+        are ignored while absence of a callback-produced key remains part
+        of the branch observation's identity.
         """
         keys = set()
         for branch in self.branches:
@@ -408,12 +539,10 @@ class BeliefPolicyNode:
     ) -> BeliefPolicyRouting:
         """Route an observation and report how it was matched.
 
-        The observation is projected onto :attr:`observation_schema`, so
-        telemetry mappings carrying extra sensor fields match their retained
-        branch instead of leaking to the pruned-observation fallback.  A
-        mapping *missing* schema keys is a shape mismatch — an integration
-        error, not a low-probability observation — and raises ``KeyError``
-        rather than silently routing through the probabilistic fallback.
+        The observation is intersected with :attr:`observation_schema`, so
+        unrelated telemetry fields are ignored. The intersection is matched
+        exactly: callback mappings may have heterogeneous key sets, and an
+        absent key is distinct from a present key whose value is ``None``.
         """
         if not self.branches and self.fallback_policy is None:
             return BeliefPolicyRouting(
@@ -424,15 +553,9 @@ class BeliefPolicyNode:
             )
         schema = self.observation_schema
         supplied = dict(observation)
-        missing = [key for key in schema if key not in supplied]
-        if missing:
-            raise KeyError(
-                f"observation is missing planner schema keys {missing}; "
-                f"schema is {list(schema)}.  Routing a partial observation "
-                "through the pruned-observation fallback would silently "
-                "change the selected action"
-            )
-        projected = {key: supplied[key] for key in schema}
+        projected = {
+            key: supplied[key] for key in schema if key in supplied
+        }
         for branch in self.branches:
             if branch.observation == projected:
                 return BeliefPolicyRouting(
@@ -460,10 +583,12 @@ class BeliefPolicyNode:
     ) -> Optional["BeliefPolicyNode"]:
         """Return the continuation for an observation via :meth:`route`.
 
-        Extra observation keys are projected away before matching; missing
-        schema keys raise ``KeyError``.  A well-formed observation matching
-        no retained branch returns the pruned-observation fallback (or
-        ``None`` when the policy is terminal or has no fallback).  Use
+        Extra observation keys are projected away before matching. Absence
+        is part of observation identity, so heterogeneous callback mappings
+        route exactly with only the keys they originally supplied. An
+        observation matching no retained branch returns the pruned-
+        observation fallback (or ``None`` when the policy is terminal or
+        has no fallback). Use
         :meth:`route` to distinguish exact, fallback, terminal, and
         unmatched routing explicitly.
         """
@@ -487,7 +612,7 @@ class BeliefActionCertificate:
     bounds the unrestricted full-observation optimum for this root action.
     """
 
-    action: Dict[str, object]
+    action: Mapping[str, object]
     policy_utility_lower_bound: float
     policy_utility_upper_bound: float
     utility_lower_bound: float
@@ -496,6 +621,9 @@ class BeliefActionCertificate:
     policy_goal_probability_upper_bound: float = 1.0
     goal_probability_lower_bound: float = 0.0
     goal_probability_upper_bound: float = 1.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "action", _immutable_mapping(self.action))
 
 
 @dataclass(frozen=True)
@@ -518,7 +646,15 @@ class ConditionalBeliefPolicyResult:
     ``best_achievable_goal_probability`` is exact even when
     ``constraint_optimality`` reports frontier truncation, and
     ``constraint_certification`` scopes feasibility through pruning and
-    tracker mass like the utility certificates.
+    tracker mass like the utility certificates. Every active whole-policy
+    and per-branch floor participates in ``constraint_certification``.
+    Observation pruning makes branch-floor feasibility ``indeterminate``
+    unless infeasibility is established without aggregation.
+
+    Frontier diagnostics report aggregate generated/retained point counts,
+    the largest nondominated pre-cap frontier, truncation counts by depth and
+    root action, and a conservative feasible-utility upper bound/gap. The
+    same search counters appear in :class:`PlanningStats`.
     """
 
     policy: BeliefPolicyNode
@@ -548,6 +684,14 @@ class ConditionalBeliefPolicyResult:
     best_achievable_goal_probability: Optional[float] = None
     constraint_certification: Optional[str] = None
     constraint_optimality: Optional[str] = None
+    generated_frontier_points: int = 0
+    retained_frontier_points: int = 0
+    maximum_frontier_size: int = 0
+    truncated_frontier_nodes: int = 0
+    frontier_saturation_by_depth: Tuple[Tuple[int, int], ...] = ()
+    frontier_saturated_root_actions: Tuple[object, ...] = ()
+    constraint_utility_upper_bound: Optional[float] = None
+    constraint_utility_optimality_gap: Optional[float] = None
 
     @property
     def action(self) -> Dict[str, object]:
@@ -943,7 +1087,10 @@ class CompiledPlanner:
         mappings.  States producing the same observation are combined into a
         posterior belief before the next action is optimized.  Returning the
         state itself implements perfect observation; returning an empty
-        mapping implements no information.
+        mapping implements no information. Observation mappings at one node
+        may use heterogeneous key sets. Policy routing treats absence as part
+        of observation identity while ignoring telemetry keys never emitted
+        by any retained branch at that node.
 
         Unlike ``belief`` (validated and normalized above), the
         probabilities returned by ``outcome_model`` and ``observation_model``
@@ -985,12 +1132,18 @@ class CompiledPlanner:
         bounds each Pareto frontier; when the cap actually binds, the result
         says ``constraint_optimality="frontier-truncated"`` (feasibility and
         best-achievable stay exact; only cost-optimality may be lost).
+        Result and progress statistics expose generated/retained points,
+        largest frontier, truncation by depth/root action, and a conservative
+        utility upper bound/gap for provisioning.
         ``constraint_certification`` composes observation pruning and
         tracker-retained mass into ``certified-feasible``,
         ``certified-infeasible``, or ``indeterminate``, scoped exactly like
-        the utility certificates.  Under a constraint, the utility-regret
-        fields still compare utilities across the reported per-action
-        policies; feasibility governs selection.
+        the utility certificates. Every active whole-policy and branch floor
+        participates. A merged observation fallback cannot certify every
+        contributing raw branch and is therefore ``indeterminate`` unless an
+        unaggregated result proves infeasibility. Under a constraint, the
+        utility-regret fields still compare utilities across the reported
+        per-action policies; feasibility governs selection.
 
         ``control`` optionally supplies cooperative wall-clock limits,
         a cancellation callback, and progress reporting, mirroring
@@ -1320,7 +1473,12 @@ class CompiledPlanner:
                 "generated_observation_branches": 0,
                 "pruned_observation_branches": 0,
                 "frontier_truncations": 0,
+                "frontier_generated_points": 0,
+                "frontier_retained_points": 0,
+                "frontier_maximum_size": 0,
             }
+            frontier_truncations_by_depth: Dict[int, int] = {}
+            frontier_saturated_root_actions = set()
 
             def sync_session() -> None:
                 session.policy_nodes = counters["policy_nodes"]
@@ -1328,6 +1486,27 @@ class CompiledPlanner:
                 session.observation_branches = counters[
                     "observation_branches"
                 ]
+                session.frontier_generated_points = counters[
+                    "frontier_generated_points"
+                ]
+                session.frontier_retained_points = counters[
+                    "frontier_retained_points"
+                ]
+                session.frontier_maximum_size = counters[
+                    "frontier_maximum_size"
+                ]
+                session.frontier_truncated_nodes = counters[
+                    "frontier_truncations"
+                ]
+                session.frontier_saturation_by_depth = tuple(
+                    sorted(frontier_truncations_by_depth.items())
+                )
+                session.frontier_saturated_root_actions = tuple(
+                    sorted(
+                        frontier_saturated_root_actions,
+                        key=repr,
+                    )
+                )
 
             def expand_action(
                 branch_belief: Sequence[Tuple[Dict[str, object], float]],
@@ -1738,7 +1917,12 @@ class CompiledPlanner:
                 )
                 return candidates[0], tuple(candidates)
 
-            def prune_frontier(points):
+            def prune_frontier(
+                points,
+                *,
+                depth: int,
+                root_action: Optional[object],
+            ):
                 """Keep the nondominated (goal desc, cost asc) frontier,
                 capped at ``max_frontier_points`` with endpoints preserved.
 
@@ -1750,6 +1934,7 @@ class CompiledPlanner:
                 exact; only cost-optimality can degrade, which the result
                 reports as ``frontier-truncated``.
                 """
+                counters["frontier_generated_points"] += len(points)
                 points.sort(key=lambda point: (-point[0], point[1]))
                 kept = []
                 best_cost = math.inf
@@ -1757,14 +1942,28 @@ class CompiledPlanner:
                     if point[1] < best_cost - 1e-15:
                         kept.append(point)
                         best_cost = point[1]
+                counters["frontier_maximum_size"] = max(
+                    counters["frontier_maximum_size"], len(kept)
+                )
                 if len(kept) > max_frontier_points:
                     counters["frontier_truncations"] += 1
+                    frontier_truncations_by_depth[depth] = (
+                        frontier_truncations_by_depth.get(depth, 0) + 1
+                    )
+                    if root_action is not None:
+                        frontier_saturated_root_actions.add(root_action)
+                    elif depth == 0:
+                        frontier_saturated_root_actions.update(
+                            point[2].action[command_name]
+                            for point in kept
+                        )
                     span = len(kept) - 1
                     picks = sorted({
                         round(index * span / (max_frontier_points - 1))
                         for index in range(max_frontier_points)
                     })
                     kept = [kept[index] for index in picks]
+                counters["frontier_retained_points"] += len(kept)
                 return kept
 
             def solve_policy_frontier(
@@ -1773,6 +1972,7 @@ class CompiledPlanner:
                 ],
                 step: int,
                 branch_floor: Optional[float],
+                root_action: Optional[object] = None,
             ) -> List[Tuple[float, float, BeliefPolicyNode]]:
                 """Pareto frontier of (goal probability, expected cost,
                 policy) points for this belief.
@@ -1786,6 +1986,7 @@ class CompiledPlanner:
                 """
                 points: List[Tuple[float, float, BeliefPolicyNode]] = []
                 for action in action_values:
+                    action_root = action if step == 0 else root_action
                     command = {command_name: action}
                     expanded_outcomes = expand_action(
                         branch_belief, step, action, command
@@ -1844,7 +2045,10 @@ class CompiledPlanner:
                     utility_upper = 0.0
                     for probability, posterior, group in branch_specs:
                         frontier = solve_policy_frontier(
-                            posterior, step + 1, branch_floor
+                            posterior,
+                            step + 1,
+                            branch_floor,
+                            action_root,
                         )
                         if group is None:
                             # Pruned mass keeps the same maximum-credit
@@ -1886,7 +2090,11 @@ class CompiledPlanner:
                                         chosen + (point,),
                                     )
                                 )
-                        combos = prune_frontier(merged)
+                        combos = prune_frontier(
+                            merged,
+                            depth=step,
+                            root_action=action_root,
+                        )
 
                     action_points = []
                     for expected_goal, continuation_cost, chosen in combos:
@@ -1965,9 +2173,14 @@ class CompiledPlanner:
                             command, best_for_action[2].expected_utility
                         )
                     points.extend(action_points)
-                return prune_frontier(points)
+                return prune_frontier(
+                    points,
+                    depth=step,
+                    root_action=root_action,
+                )
 
             constraint_extras: Dict[str, object] = {}
+            branch_floor_satisfiable: Optional[bool] = None
             if (
                 min_goal_probability is not None
                 or min_branch_goal_probability is not None
@@ -2055,7 +2268,51 @@ class CompiledPlanner:
                         if counters["frontier_truncations"]
                         else "exact"
                     ),
+                    "generated_frontier_points": counters[
+                        "frontier_generated_points"
+                    ],
+                    "retained_frontier_points": counters[
+                        "frontier_retained_points"
+                    ],
+                    "maximum_frontier_size": counters[
+                        "frontier_maximum_size"
+                    ],
+                    "truncated_frontier_nodes": counters[
+                        "frontier_truncations"
+                    ],
+                    "frontier_saturation_by_depth": tuple(
+                        sorted(frontier_truncations_by_depth.items())
+                    ),
+                    "frontier_saturated_root_actions": tuple(
+                        sorted(
+                            frontier_saturated_root_actions,
+                            key=repr,
+                        )
+                    ),
                 }
+                minimum_immediate_cost = min(
+                    action_cost(
+                        action,
+                        {command_name: action},
+                    )
+                    for action in action_values
+                )
+                constraint_utility_upper_bound = (
+                    goal_reward
+                    - cost_weight * minimum_immediate_cost
+                    if counters["frontier_truncations"]
+                    else best_policy.expected_utility
+                )
+                constraint_extras[
+                    "constraint_utility_upper_bound"
+                ] = constraint_utility_upper_bound
+                constraint_extras[
+                    "constraint_utility_optimality_gap"
+                ] = max(
+                    0.0,
+                    constraint_utility_upper_bound
+                    - best_policy.expected_utility,
+                )
             else:
                 best_policy, root_evaluations = solve_conditional_policy(
                     checked_states, 0
@@ -2177,12 +2434,17 @@ class CompiledPlanner:
                 maximum_regret = 0.0
             root_action_certified = maximum_regret == 0.0
             belief_is_approximate = belief_exact is False
+            if (
+                min_goal_probability is not None
+                or min_branch_goal_probability is not None
+            ):
+                # Every active reliability constraint participates in the
+                # combined certificate. Whole-policy feasibility composes
+                # tracker mass through the action certificates. A branch
+                # floor is certifiable only when raw observations were not
+                # merged and the tracked belief itself is not approximate.
+                statuses = []
             if min_goal_probability is not None:
-                # Feasibility certification composes the same scoped mass
-                # as the utility bounds: the selected policy's exact goal
-                # probability is a valid lower bound even under observation
-                # pruning, while certified infeasibility needs the
-                # unrestricted upper bound across every allowed action.
                 composed_goal_lower = (
                     selected_certificate.goal_probability_lower_bound
                 )
@@ -2191,17 +2453,41 @@ class CompiledPlanner:
                     for certificate in action_certificates
                 )
                 if composed_goal_lower >= min_goal_probability - 1e-9:
-                    constraint_extras["constraint_certification"] = (
-                        "certified-feasible"
-                    )
+                    statuses.append("satisfied")
                 elif composed_goal_upper_max < min_goal_probability - 1e-9:
-                    constraint_extras["constraint_certification"] = (
-                        "certified-infeasible"
-                    )
+                    statuses.append("impossible")
                 else:
-                    constraint_extras["constraint_certification"] = (
-                        "indeterminate"
+                    statuses.append("unknown")
+            if min_branch_goal_probability is not None:
+                branch_certificate_exact = (
+                    not is_approximate
+                    and belief_exact is not False
+                )
+                if not branch_floor_satisfiable:
+                    statuses.append(
+                        "impossible"
+                        if branch_certificate_exact
+                        else "unknown"
                     )
+                elif branch_certificate_exact:
+                    statuses.append("satisfied")
+                else:
+                    statuses.append("unknown")
+            if (
+                min_goal_probability is not None
+                or min_branch_goal_probability is not None
+            ):
+                if "impossible" in statuses:
+                    certification = "certified-infeasible"
+                elif statuses and all(
+                    status == "satisfied" for status in statuses
+                ):
+                    certification = "certified-feasible"
+                else:
+                    certification = "indeterminate"
+                constraint_extras["constraint_certification"] = (
+                    certification
+                )
             session.finish()
             return ConditionalBeliefPolicyResult(
                 policy=best_policy,

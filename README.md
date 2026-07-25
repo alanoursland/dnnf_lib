@@ -205,10 +205,15 @@ Each retained `BeliefPolicyBranch` exposes the normalized posterior the
 planner optimized against (plus `posterior_marginals()`), so an operator
 can inspect which hidden states justified a branch's action without
 re-deriving the Bayes update. At execution time,
-`BeliefPolicyNode.route(observation)` projects telemetry onto the node's
-`observation_schema` (extra sensor fields are ignored, missing schema keys
-raise) and reports exact, fallback, terminal, or unmatched routing;
+`BeliefPolicyNode.route(observation)` intersects telemetry with the node's
+`observation_schema` and reports exact, fallback, terminal, or unmatched
+routing. Extra sensor fields are ignored; callback branches may have
+heterogeneous key sets because absence is part of observation identity.
 `continuation()` remains the compact accessor on top of it.
+Certificate-bearing policy trees are recursively immutable: nested action,
+observation, posterior-state, and certificate mappings cannot be changed
+without constructing a new result. Convenience properties such as
+`result.action` return mutable defensive copies for execution.
 
 For noisy sensors with many low-probability readings, set
 `min_observation_probability` and/or `max_observations_per_node`. Pruned
@@ -233,6 +238,17 @@ An unreachable floor is reported (`feasible=False` with
 `best_achievable_goal_probability`), never silently degraded, and
 `constraint_certification` composes pruning and tracker mass into
 certified-feasible / certified-infeasible / indeterminate.
+Every active whole-policy and branch floor participates in that combined
+status. When observation pruning merges raw readings, a branch-floor result
+is conservatively `indeterminate` rather than certifying aggregate fallback
+performance as per-reading safety.
+
+When `max_frontier_points` binds, `ConditionalBeliefPolicyResult` and
+`PlanningStats` expose generated/retained point totals, the largest
+nondominated pre-cap frontier, truncated-node count, saturation by depth and
+root action, and a conservative feasible-utility upper bound and optimality
+gap. This makes the exponential frontier work measurable and provisionable
+without implying that truncation invalidates feasibility endpoints.
 
 When the input is a `TrackedBelief`, the planner composes tracker uncertainty
 into separate end-to-end action bounds. Results preserve the policy-only
