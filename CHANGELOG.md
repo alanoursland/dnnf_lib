@@ -63,6 +63,16 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   fallback posterior. Pruned branch certificates are `indeterminate` unless
   exact, unaggregated analysis certifies the result; exact raw-branch
   infeasibility remains `certified-infeasible`.
+- **GAP-026 — best-achievable reliability scope:** constrained conditional
+  results now distinguish Pareto-frontier exactness from observation
+  partition optimality. `best_achievable_goal_probability_scope` identifies
+  full-observation versus selected-coarsening ceilings, and pruned results
+  expose an unrestricted reliability upper bound instead of presenting the
+  coarsened value as a global ceiling.
+- **GAP-028 — robust scenario execution costs:** native robust policy audits
+  now stop a path when the compiled target is already satisfied. Scenario
+  action costs and utilities no longer include continuation actions after
+  physical success and match independent policy enumeration.
 
 ### Added
 
@@ -171,8 +181,9 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   variant. Infeasibility is reported, not raised: the most reliable policy
   returns with `feasible=False` and `best_achievable_goal_probability`.
   `max_frontier_points` bounds each frontier with endpoints preserved, so
-  feasibility and best-achievable stay exact under truncation and only
-  cost-optimality can degrade (`constraint_optimality`). Action
+  feasibility and best-achievable stay exact within the selected observation
+  partition under frontier truncation, while cost-optimality can degrade
+  (`constraint_optimality`). Action
   certificates gain goal-probability lower/upper bounds, and
   `constraint_certification` composes observation pruning and
   tracker-retained mass into certified-feasible, certified-infeasible, or
@@ -184,6 +195,13 @@ Notable user-facing changes are recorded here for inclusion in release notes.
   depth and root action, and a conservative feasible-utility upper bound and
   optimality gap. Callers can measure progress as `max_frontier_points`
   increases without weakening exact feasibility endpoints.
+- **GAP-027 — scenario-robust outcome planning:** `plan_belief()` now accepts
+  named `outcome_scenarios` with `robust_objective="maximin"`. A bounded,
+  positive scenario-weight grid generates common executable policy trees,
+  which are independently audited under every scenario. Results expose the
+  candidate portfolio, per-scenario probability/cost/utility, worst-case
+  metrics, robust feasibility, and the explicit
+  `weight-grid-heuristic`/`robust-scenario-weight-grid` scope.
 
 ### Documentation and examples
 
@@ -219,15 +237,19 @@ Notable user-facing changes are recorded here for inclusion in release notes.
 - Updated the mutation, heterogeneous-observation, branch-constraint,
   branch-pruning, and islanded-frontier experiments to validate GAP-021
   through GAP-025 and report the new diagnostic surface.
+- Updated the best-achievable counterexample and adaptive island controller
+  to validate scoped reliability ceilings and bounded scenario-robust
+  planning.
 - Updated the black-box edge-case experiment and archived GAP-001 through
-  GAP-025 under `modenexus_apps/gaps/fixed`.
+  GAP-028 under `modenexus_apps/gaps/fixed`.
 
 ### Verification
 
-- ModeNexus test suite: **344 passed, 7 skipped**.
+- ModeNexus test suite: **387 passed, 1 skipped**.
 - Black-box API edge-case checks: all fixed cases report `OK`.
-- Companion applications: all **59 non-PyTorch tests passed**, including the updated
-  belief-metadata, validation-edge, operational-control,
-  observation-routing, risk-constraint, and branch-explainability
-  reproducers asserting the fixed behavior. The optional PyTorch batch check
-  was not run because PyTorch was unavailable in this verification runtime.
+- Companion applications: all **66 tests passed** in partitioned
+  verification. The all-in-one run reached its ten-minute cap after its
+  first 55 passing tests and no failures; the remaining 10 tests then passed
+  separately, and the subsequently added compact native-robust audit also
+  passed. Focused GAP-026 and adaptive GAP-027 checks passed in 35.65 and
+  142.90 seconds respectively.

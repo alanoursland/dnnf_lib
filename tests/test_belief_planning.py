@@ -670,6 +670,124 @@ def test_pruned_branch_floor_certificate_is_indeterminate():
     assert result.constraint_certification == "indeterminate"
 
 
+def test_best_achievable_probability_reports_coarsening_scope_and_bound():
+    pruned = staged_repair_planner().plan_belief(
+        min_goal_probability=0.99,
+        max_observations_per_node=1,
+        **staged_arguments(),
+    )
+    assert not pruned.feasible
+    assert pruned.constraint_optimality == "exact"
+    assert (
+        pruned.best_achievable_goal_probability_scope
+        == "selected-observation-coarsening"
+    )
+    assert pruned.observation_partition_optimality == "heuristic-pruned"
+    assert pruned.best_achievable_goal_probability_upper_bound >= (
+        pruned.best_achievable_goal_probability
+    )
+
+    unpruned = staged_repair_planner().plan_belief(
+        min_goal_probability=0.99,
+        **staged_arguments(),
+    )
+    assert (
+        unpruned.best_achievable_goal_probability_scope
+        == "full-observation-policy-space"
+    )
+    assert unpruned.observation_partition_optimality == "exact"
+
+
+def test_scenario_robust_maximin_reports_per_scenario_metrics():
+    def favorable(state, command):
+        action = command["action"]
+        if state["mode"] == "bad" and action in {"cheap", "sure"}:
+            success = 0.99 if action == "cheap" else 0.60
+            return [({"mode": "goal"}, success), ({}, 1 - success)]
+        return [({}, 1.0)]
+
+    def adverse(state, command):
+        action = command["action"]
+        if state["mode"] == "bad" and action in {"cheap", "sure"}:
+            success = 0.10 if action == "cheap" else 0.80
+            return [({"mode": "goal"}, success), ({}, 1 - success)]
+        return [({}, 1.0)]
+
+    result = reliability_planner(horizon=2).plan_belief(
+        belief=[({"mode": "bad"}, 1.0)],
+        target={"done": True},
+        outcome_scenarios={
+            "favorable": favorable,
+            "adverse": adverse,
+        },
+        robust_objective="maximin",
+        robust_weight_resolution=4,
+        max_robust_candidates=10,
+        observation_model=lambda state, command: {
+            "mode": state["mode"]
+        },
+        action_costs=RELIABILITY_COSTS,
+        cost_weight=0.5,
+        min_goal_probability=0.75,
+    )
+
+    assert result.robust_objective == "maximin"
+    assert result.robust_optimality == "weight-grid-heuristic"
+    assert result.certificate_scope == "robust-scenario-weight-grid"
+    assert result.robust_candidate_count >= 1
+    assert len(result.robust_scenario_evaluations) == 2
+    assert result.worst_case_scenario in {"favorable", "adverse"}
+    assert result.worst_case_expected_utility == pytest.approx(
+        min(
+            item.expected_utility
+            for item in result.robust_scenario_evaluations
+        )
+    )
+    assert result.worst_case_goal_probability == pytest.approx(
+        min(
+            item.expected_goal_probability
+            for item in result.robust_scenario_evaluations
+        )
+    )
+    scenario_metrics = {
+        item.scenario: item
+        for item in result.robust_scenario_evaluations
+    }
+    assert scenario_metrics["favorable"].expected_action_cost == (
+        pytest.approx(0.005)
+    )
+    assert scenario_metrics["adverse"].expected_action_cost == (
+        pytest.approx(0.45)
+    )
+    assert result.robust_feasible
+    assert result.constraint_certification == "certified-feasible"
+    assert not result.root_action_certified
+    assert result.worst_case_goal_probability == pytest.approx(
+        result.robust_best_achievable_min_goal_probability
+    )
+    assert result.worst_case_goal_probability == pytest.approx(
+        result.robust_best_achievable_min_goal_probability
+    )
+    assert result.worst_case_goal_probability == pytest.approx(
+        result.robust_best_achievable_min_goal_probability
+    )
+
+
+def test_scenario_robust_validation():
+    with pytest.raises(ValueError, match="either outcome_model"):
+        reliability_planner(horizon=2).plan_belief(
+            belief=[({"mode": "bad"}, 1.0)],
+            target={"done": True},
+            outcome_model=reliability_outcomes,
+            outcome_scenarios={
+                "a": reliability_outcomes,
+                "b": reliability_outcomes,
+            },
+            robust_objective="maximin",
+            observation_model=lambda state, command: dict(state),
+        )
+
+
 def test_reliability_certification_composes_tracker_scope():
     planner = staged_repair_planner()
     unknown = planner.plan_belief(

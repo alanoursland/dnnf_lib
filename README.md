@@ -238,6 +238,12 @@ An unreachable floor is reported (`feasible=False` with
 `best_achievable_goal_probability`), never silently degraded, and
 `constraint_certification` composes pruning and tracker mass into
 certified-feasible / certified-infeasible / indeterminate.
+`best_achievable_goal_probability_scope` distinguishes a full-observation
+ceiling from one computed inside the selected observation coarsening, while
+`observation_partition_optimality` distinguishes that heuristic choice from
+Pareto-frontier exactness. A pruned result also exposes
+`best_achievable_goal_probability_upper_bound` for the unrestricted
+observation-policy space.
 Every active whole-policy and branch floor participates in that combined
 status. When observation pruning merges raw readings, a branch-floor result
 is conservatively `indeterminate` rather than certifying aggregate fallback
@@ -249,6 +255,19 @@ nondominated pre-cap frontier, truncated-node count, saturation by depth and
 root action, and a conservative feasible-utility upper bound and optimality
 gap. This makes the exponential frontier work measurable and provisionable
 without implying that truncation invalidates feasibility endpoints.
+
+For a finite uncertainty set, replace `outcome_model` with
+`outcome_scenarios={"mean": mean_model, "stress": stress_model}` and set
+`robust_objective="maximin"`. The planner generates common conditional
+policies over a positive scenario-weight grid, independently executes each
+candidate under every named outcome model, and reports per-scenario
+probability, cost, utility, worst-case metrics, robust feasibility, and the
+complete bounded candidate portfolio. `robust_weight_resolution` controls
+grid density, while `max_robust_candidates` caps the number of scalarized
+planner calls before work begins. Results say
+`robust_optimality="weight-grid-heuristic"` and
+`certificate_scope="robust-scenario-weight-grid"`: the computation is
+explicitly bounded and does not claim global robust-policy optimality.
 
 When the input is a `TrackedBelief`, the planner composes tracker uncertainty
 into separate end-to-end action bounds. Results preserve the policy-only
