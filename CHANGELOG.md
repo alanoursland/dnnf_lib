@@ -4,6 +4,14 @@ Notable user-facing changes are recorded here for inclusion in release notes.
 
 ## Unreleased
 
+## 0.2.0 - 2026-07-25
+
+**your numbers will change.** ModeNexus 0.2.0 corrects inference and planning
+behavior that can produce different posteriors from the same inputs than
+0.1.0. The new results are the intended ones, but upgrading can shift logged
+history, stored baselines, and regression fixtures. Recompute and review those
+artifacts when adopting this release.
+
 ### Documentation
 
 - Trimmed package docstrings to practical API usage: inputs, outputs, result

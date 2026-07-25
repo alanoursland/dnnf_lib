@@ -1,14 +1,15 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "modenexus"
-version = "0.1.0"
+version = "0.2.0"
 description = "Decomposable Negation Normal Form (DNNF) compilation, weighted inference, and diagnosis, with optional PyTorch GPU evaluation"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Alan Oursland" }]
 keywords = [
     "dnnf",
