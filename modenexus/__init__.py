@@ -48,6 +48,7 @@ from .eval import (
 )
 from .formula import And, Formula, Not, Or, Prop, at_most_one, exactly_one, iff, xor
 from .kbest import enumerate_map, enumerate_models
+from .invariants import ModeNexusInvariantError
 from .planning import (
     BeliefActionEvaluation,
     BeliefActionCertificate,
@@ -59,6 +60,9 @@ from .planning import (
     BeliefPolicyResult,
     BeliefPolicyRouting,
     BeliefSequenceEvaluation,
+    ConditionalPolicyApproximation,
+    ConditionalPolicyCertificate,
+    ConditionalPolicyDiagnostics,
     ConditionalBeliefPolicyResult,
     EstimateResult,
     PlanControl,
@@ -71,6 +75,8 @@ from .planning import (
     PlanningCancelled,
     PlanningInterrupted,
     PlanningStats,
+    PlanningWorkEstimate,
+    PlanningWorkReport,
     TransitionCost,
 )
 from .tracking import (
@@ -132,12 +138,18 @@ __all__ = [
     "BeliefPolicyRouting",
     "BeliefSequenceEvaluation",
     "ConditionalBeliefPolicyResult",
+    "ConditionalPolicyApproximation",
+    "ConditionalPolicyCertificate",
+    "ConditionalPolicyDiagnostics",
+    "ModeNexusInvariantError",
     "PlanControl",
     "PlanResult",
     "PlanningBudgetExceeded",
     "PlanningCancelled",
     "PlanningInterrupted",
     "PlanningStats",
+    "PlanningWorkEstimate",
+    "PlanningWorkReport",
     "EstimateResult",
     "PlannerCostBreakdown",
     "RobustPolicyEvaluation",

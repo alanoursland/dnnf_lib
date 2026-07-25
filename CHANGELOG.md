@@ -11,6 +11,31 @@ Notable user-facing changes are recorded here for inclusion in release notes.
 - Moved detailed exactness, representation, normalization, certificate, and
   complexity claims into `CONTRACTS.md`, including their scope and the
   distinction between a mathematical contract and independent certification.
+- Trimmed the README's guarantee-heavy prose and linked the practical API
+  examples to the centralized contracts reference.
+
+### Reliability and planning observability
+
+- Added the package-root `ModeNexusInvariantError` and always-on
+  postcondition checks for returned probabilities, normalized posterior and
+  belief rows, EM monotonicity, VOI bounds, conditioned evidence, and planner
+  certificate relationships. Invalid caller inputs continue to use
+  `ValueError`; the dedicated exception signals an implementation invariant.
+- Added an independent exhaustive horizon-two planning oracle for tiny state,
+  outcome, and observation spaces. It checks exact conditional policies,
+  chance and branch constraints, pruning bounds, and scenario-robust metrics
+  without calling ModeNexus planning or inference internals.
+- The new oracle exposed and fixed a robust-audit evidence-composition defect:
+  target evidence had overwritten conflicting scenario state evidence, which
+  could yield a goal probability above one. Conflicts now contribute zero
+  probability.
+- Added `CompiledPlanner.estimate_belief_work()` preflight forecasts and
+  per-result `PlanningWorkReport` measurements for action evaluations, goal
+  queries, callbacks, policy nodes, branches, frontier work, and elapsed time.
+  Forecasts are explicitly workload estimates, not runtime guarantees.
+- Added grouped `approximation_details`, `certificate`, and `diagnostics`
+  views to `ConditionalBeliefPolicyResult` while retaining the existing flat
+  fields for compatibility.
 
 ### Fixed — adversarial stress suite
 
@@ -313,11 +338,10 @@ Notable user-facing changes are recorded here for inclusion in release notes.
 
 ### Verification
 
-- ModeNexus test suite: **397 passed, 1 skipped**.
-- Adversarial stress suite: **1,086 passed, 0 xfailed** in 12.27
+- ModeNexus test suite: **402 passed, 1 skipped**.
+- Adversarial stress suite: **1,086 passed, 0 xfailed** in 13.44
   seconds.
 - Black-box API edge-case checks: all fixed cases report `OK`.
 - Companion applications: all **81 tests passed** in bounded partitions.
-  A monolithic run passed its first 61 tests without a failure before
-  reaching the 10-minute aggregate budget; the remaining tests passed in
-  partitions of 9 tests (51.94 seconds) and 11 tests (42.67 seconds).
+  The intentionally expensive exact island-policy partition completed in
+  308.93 seconds; the remaining partitions completed without failures.

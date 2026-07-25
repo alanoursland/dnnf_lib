@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .diagnosis import CompiledSystem, EvidenceValue
+from .invariants import ModeNexusInvariantError, check_distribution
 
 ModeAssignment = Tuple[Tuple[str, str], ...]  # sorted ((var, value), ...)
 Transitions = Dict[str, Dict[str, Dict[str, float]]]
@@ -410,11 +411,20 @@ class ModeTracker:
         """Current normalized beam plus exactness and retained-mass metadata."""
         z = _logsumexp(list(self._belief.values()))
         ranked = sorted(self._belief.items(), key=lambda kv: -kv[1])
-        return TrackedBelief(
+        belief = TrackedBelief(
             [(dict(k), math.exp(v - z)) for k, v in ranked],
             exact=self._belief_exact,
             retained_probability_mass=self._retained_probability_mass,
         )
+        check_distribution(
+            (probability for _, probability in belief),
+            "tracker belief",
+        )
+        if belief.exact and belief.retained_probability_mass != 1.0:
+            raise ModeNexusInvariantError(
+                "exact tracker belief must retain probability mass 1"
+            )
+        return belief
 
     def marginals(self) -> Dict[str, Dict[str, float]]:
         """Per-mode-variable marginals of the current belief."""

@@ -29,6 +29,30 @@ construction rules, regression tests, and small-instance reference oracles.
   Materially invalid probabilities, distributions, or bounds must not be
   silently reinterpreted as valid values.
 
+## Runtime invariant enforcement
+
+`ModeNexusInvariantError` identifies an internal postcondition failure. It is
+exported at the package root and is distinct from `ValueError`, which remains
+the usual signal for invalid caller input. The checks are ordinary runtime
+checks, not Python `assert` statements, so optimized interpreter mode does not
+remove them.
+
+Always-on checks cover the high-leverage public result boundaries:
+
+- conditioned circuits retain their evidence literals;
+- posterior and tracker belief rows are finite, normalized distributions;
+- a posterior queried for a hard-observed variable is a point mass;
+- EM log-likelihood steps do not materially decrease;
+- value-of-information results remain between zero and the available entropy;
+- planner probabilities, costs, interval endpoints, and certificate bounds
+  satisfy their local numeric relationships; and
+- explicit target evidence is intersected with branch evidence rather than
+  replacing it.
+
+These checks are defense in depth. They detect a broken implementation before
+an invalid value becomes a trusted certificate, but they do not independently
+prove the underlying algorithm or validate the physical model.
+
 ## Boolean NNF and DNNF circuits
 
 An NNF circuit is a rooted DAG with literal or constant leaves and AND/OR
@@ -304,6 +328,23 @@ observation branching, state count, or frontier width. High computation is
 allowed; the contract is that configured limits and reported statistics make
 the chosen computation visible.
 
+`CompiledPlanner.estimate_belief_work()` provides a preflight
+`PlanningWorkEstimate`. It uses the declared horizon, actions, belief size,
+scenario grid, and optional outcome/observation branch hints. It is a planning
+estimate, not an upper bound or a duration prediction. The configured hard
+caps remain authoritative.
+
+Belief-planning results expose a `PlanningWorkReport` through `result.work`.
+It pairs that preflight estimate with elapsed time and measured action
+evaluations, goal queries, policy nodes, callback calls, branch counts, and
+frontier work. These counters make an expensive run explainable after the
+fact without pretending that the per-decision cost is constant.
+
+`ConditionalBeliefPolicyResult` retains its flat fields for compatibility and
+also groups them into `approximation_details`, `certificate`, and
+`diagnostics` views. The views reorganize the same immutable result data; they
+do not alter certificate scope.
+
 ## Torch evaluation and learning
 
 `TorchCircuit` lowers a circuit into depth-ordered tensor operations.
@@ -335,6 +376,9 @@ The principal regression and property checks live in:
 - `tests/test_compiler.py` and `tests/test_fd.py`;
 - `tests/test_diagnosis.py`;
 - `tests/test_belief_planning.py`;
+- `tests/planning_oracle.py` and `tests/test_planning_oracle.py`, whose
+  deliberately small horizon-two exhaustive evaluator does not call the
+  planner or ModeNexus inference routines;
 - `tests/test_tracking.py` and tracker refinement tests;
 - the adversarial suite under `modenexus_stress/exercises`.
 

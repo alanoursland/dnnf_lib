@@ -14,6 +14,12 @@ from . import fd
 from .compile_control import CompileControl
 from .fd import FDAtom, FDCircuit, FDCnf
 from .formula import Formula, Not, iff
+from .invariants import (
+    ModeNexusInvariantError,
+    check_distribution,
+    check_interval,
+    check_nondecreasing,
+)
 
 EvidenceValue = Union[bool, str, int, float]
 
@@ -564,6 +570,34 @@ class CompiledSystem:
                     if log_joint == -math.inf
                     else math.exp(log_joint - log_z)
                 )
+            dist = {
+                value: check_interval(
+                    probability,
+                    0.0,
+                    1.0,
+                    f"posterior probability {name!r}={value!r}",
+                )
+                for value, probability in dist.items()
+            }
+            check_distribution(dist, f"posterior row for {name!r}")
+            if (
+                name in evidence
+                and self._soft_likelihoods(var, evidence[name]) is None
+            ):
+                observed_index = self._value_index(name, evidence[name])
+                for index, value in enumerate(var.values):
+                    expected = 1.0 if index == observed_index else 0.0
+                    if not math.isclose(
+                        dist[value],
+                        expected,
+                        rel_tol=1e-9,
+                        abs_tol=1e-9,
+                    ):
+                        raise ModeNexusInvariantError(
+                            f"posterior row for observed variable {name!r} "
+                            f"does not respect evidence {evidence[name]!r}: "
+                            f"{dist!r}"
+                        )
             out[name] = dist
         return out
 
@@ -605,6 +639,12 @@ class CompiledSystem:
                     for i, value in enumerate(values):
                         sums[name][i] += post[name][value]
             history.append(log_lik / max(len(observations), 1))
+            if len(history) >= 2:
+                check_nondecreasing(
+                    history[-2],
+                    history[-1],
+                    "EM average log-likelihood",
+                )
             for name in fit_names:
                 var = self.vars[name]
                 total = sum(sums[name])
@@ -736,7 +776,13 @@ class CompiledSystem:
                 ev = dict(evidence)
                 ev[c] = value
                 expected += p * entropy(ev)
-            out.append((c, h0 - expected))
+            voi = check_interval(
+                h0 - expected,
+                0.0,
+                h0,
+                f"value of information for {c!r}",
+            )
+            out.append((c, voi))
         out.sort(key=lambda nv: -nv[1])
         return out
 

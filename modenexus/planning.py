@@ -26,6 +26,13 @@ from . import fd
 from .compile_control import CompileControl
 from .diagnosis import SystemModel, _normalize_categorical_weights
 from .formula import Formula
+from .invariants import (
+    ModeNexusInvariantError,
+    check_bounds,
+    check_distribution,
+    check_interval,
+    check_probability,
+)
 
 
 class _ImmutableMapping(Mapping[str, object]):
@@ -83,6 +90,85 @@ def _immutable_mapping(
     return frozen
 
 
+def _check_finite_result(
+    value: float,
+    context: str,
+    *,
+    nonnegative: bool = False,
+) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        raise ModeNexusInvariantError(
+            f"{context} must be finite; got {value!r}"
+        ) from None
+    if not math.isfinite(numeric) or (nonnegative and numeric < 0.0):
+        qualifier = "finite and non-negative" if nonnegative else "finite"
+        raise ModeNexusInvariantError(
+            f"{context} must be {qualifier}; got {numeric!r}"
+        )
+    return numeric
+
+
+@dataclass(frozen=True)
+class PlanningWorkEstimate:
+    """Preflight structural estimate for one belief-planning call."""
+
+    horizon: int
+    action_count: int
+    initial_belief_states: int
+    action_sequences: int
+    conditional: bool
+    outcome_branching_hint: Optional[int] = None
+    observation_branching_hint: Optional[int] = None
+    scenario_count: int = 1
+    scalarized_searches: int = 1
+    estimated_policy_nodes: Optional[int] = None
+    estimated_outcome_branches: Optional[int] = None
+    estimated_observation_branches: Optional[int] = None
+    max_action_sequences: Optional[int] = None
+    max_policy_nodes: Optional[int] = None
+    max_outcome_branches: Optional[int] = None
+    max_observation_branches: Optional[int] = None
+    max_frontier_points: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class PlanningWorkReport:
+    """Preflight estimate plus measured work from a completed search."""
+
+    estimate: PlanningWorkEstimate
+    elapsed_seconds: float
+    action_evaluations: int
+    goal_probability_queries: int
+    policy_nodes: int
+    outcome_callback_calls: int
+    outcome_branches: int
+    observation_callback_calls: int
+    observation_branches: int
+    generated_frontier_points: int
+    retained_frontier_points: int
+
+    @property
+    def measured_work_units(self) -> int:
+        """Sum of reported search and callback work counters."""
+        return (
+            self.action_evaluations
+            + self.goal_probability_queries
+            + self.policy_nodes
+            + self.outcome_callback_calls
+            + self.outcome_branches
+            + self.observation_callback_calls
+            + self.observation_branches
+            + self.generated_frontier_points
+        )
+
+    @property
+    def seconds_per_work_unit(self) -> float:
+        units = self.measured_work_units
+        return self.elapsed_seconds / units if units else 0.0
+
+
 @dataclass(frozen=True)
 class PlanningStats:
     """Snapshot of an in-progress or completed belief-planning search.
@@ -98,13 +184,36 @@ class PlanningStats:
     observation_branches: int
     best_action: Optional[Dict[str, object]]
     best_expected_utility: Optional[float]
+    action_evaluations: int = 0
+    goal_probability_queries: int = 0
+    outcome_callback_calls: int = 0
+    observation_callback_calls: int = 0
     generated_frontier_points: int = 0
     retained_frontier_points: int = 0
     maximum_frontier_size: int = 0
     truncated_frontier_nodes: int = 0
     frontier_saturation_by_depth: Tuple[Tuple[int, int], ...] = ()
     frontier_saturated_root_actions: Tuple[object, ...] = ()
+    work_estimate: Optional[PlanningWorkEstimate] = None
     complete: bool = False
+
+    def work_report(self) -> Optional[PlanningWorkReport]:
+        """Return normalized work telemetry when a preflight estimate exists."""
+        if self.work_estimate is None:
+            return None
+        return PlanningWorkReport(
+            estimate=self.work_estimate,
+            elapsed_seconds=self.elapsed_seconds,
+            action_evaluations=self.action_evaluations,
+            goal_probability_queries=self.goal_probability_queries,
+            policy_nodes=self.policy_nodes,
+            outcome_callback_calls=self.outcome_callback_calls,
+            outcome_branches=self.outcome_branches,
+            observation_callback_calls=self.observation_callback_calls,
+            observation_branches=self.observation_branches,
+            generated_frontier_points=self.generated_frontier_points,
+            retained_frontier_points=self.retained_frontier_points,
+        )
 
 
 class PlanningInterrupted(RuntimeError):
@@ -200,6 +309,10 @@ class _PlanSession:
         self.policy_nodes = 0
         self.outcome_branches = 0
         self.observation_branches = 0
+        self.action_evaluations = 0
+        self.goal_probability_queries = 0
+        self.outcome_callback_calls = 0
+        self.observation_callback_calls = 0
         self.frontier_generated_points = 0
         self.frontier_retained_points = 0
         self.frontier_maximum_size = 0
@@ -210,6 +323,7 @@ class _PlanSession:
         self.frontier_saturated_root_actions: Tuple[object, ...] = ()
         self.best_action: Optional[Dict[str, object]] = None
         self.best_expected_utility: Optional[float] = None
+        self.work_estimate: Optional[PlanningWorkEstimate] = None
 
     def note_root_candidate(
         self, action: Dict[str, object], expected_utility: float
@@ -229,6 +343,10 @@ class _PlanSession:
             observation_branches=self.observation_branches,
             best_action=self.best_action,
             best_expected_utility=self.best_expected_utility,
+            action_evaluations=self.action_evaluations,
+            goal_probability_queries=self.goal_probability_queries,
+            outcome_callback_calls=self.outcome_callback_calls,
+            observation_callback_calls=self.observation_callback_calls,
             generated_frontier_points=self.frontier_generated_points,
             retained_frontier_points=self.frontier_retained_points,
             maximum_frontier_size=self.frontier_maximum_size,
@@ -239,6 +357,7 @@ class _PlanSession:
             frontier_saturated_root_actions=(
                 self.frontier_saturated_root_actions
             ),
+            work_estimate=self.work_estimate,
             complete=complete,
         )
 
@@ -328,6 +447,25 @@ class BeliefActionEvaluation:
     action_cost: float
     expected_utility: float
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "expected_goal_probability",
+            check_probability(
+                self.expected_goal_probability,
+                "belief action expected goal probability",
+            ),
+        )
+        _check_finite_result(
+            self.action_cost,
+            "belief action cost",
+            nonnegative=True,
+        )
+        _check_finite_result(
+            self.expected_utility,
+            "belief action expected utility",
+        )
+
 
 @dataclass(frozen=True)
 class BeliefPlanResult:
@@ -346,6 +484,7 @@ class BeliefPlanResult:
     goal_probability_constraint: Optional[float] = None
     feasible: Optional[bool] = None
     best_achievable_goal_probability: Optional[float] = None
+    work: Optional[PlanningWorkReport] = None
     _execution_context: Optional[
         "_BeliefPolicyExecutionContext"
     ] = field(default=None, repr=False, compare=False)
@@ -354,6 +493,34 @@ class BeliefPlanResult:
         repr=False,
         compare=False,
     )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "expected_goal_probability",
+            check_probability(
+                self.expected_goal_probability,
+                "selected action expected goal probability",
+            ),
+        )
+        _check_finite_result(
+            self.action_cost,
+            "selected action cost",
+            nonnegative=True,
+        )
+        _check_finite_result(
+            self.expected_utility,
+            "selected action expected utility",
+        )
+        if not self.evaluations:
+            raise ModeNexusInvariantError(
+                "belief plan result must contain action evaluations"
+            )
+        if self.best_achievable_goal_probability is not None:
+            check_probability(
+                self.best_achievable_goal_probability,
+                "best achievable goal probability",
+            )
 
     @property
     def commands(self) -> List[Dict[str, object]]:
@@ -424,6 +591,32 @@ class BeliefSequenceEvaluation:
     expected_utility: float
     expected_goal_probabilities: Tuple[float, ...]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "expected_goal_probability",
+            check_probability(
+                self.expected_goal_probability,
+                "sequence expected goal probability",
+            ),
+        )
+        for step, probability in enumerate(
+            self.expected_goal_probabilities
+        ):
+            check_probability(
+                probability,
+                f"sequence step {step} expected goal probability",
+            )
+        _check_finite_result(
+            self.action_cost,
+            "sequence action cost",
+            nonnegative=True,
+        )
+        _check_finite_result(
+            self.expected_utility,
+            "sequence expected utility",
+        )
+
 
 @dataclass(frozen=True)
 class BeliefPolicyResult:
@@ -439,6 +632,38 @@ class BeliefPolicyResult:
     goal_probability_constraint: Optional[float] = None
     feasible: Optional[bool] = None
     best_achievable_goal_probability: Optional[float] = None
+    work: Optional[PlanningWorkReport] = None
+
+    def __post_init__(self) -> None:
+        check_probability(
+            self.expected_goal_probability,
+            "open-loop expected goal probability",
+        )
+        for step, probability in enumerate(
+            self.expected_goal_probabilities
+        ):
+            check_probability(
+                probability,
+                f"open-loop step {step} expected goal probability",
+            )
+        _check_finite_result(
+            self.action_cost,
+            "open-loop action cost",
+            nonnegative=True,
+        )
+        _check_finite_result(
+            self.expected_utility,
+            "open-loop expected utility",
+        )
+        if not self.commands or not self.evaluations:
+            raise ModeNexusInvariantError(
+                "open-loop result must contain commands and evaluations"
+            )
+        if self.best_achievable_goal_probability is not None:
+            check_probability(
+                self.best_achievable_goal_probability,
+                "open-loop best achievable goal probability",
+            )
 
     @property
     def action(self) -> Dict[str, object]:
@@ -483,6 +708,36 @@ class BeliefPolicyBranch:
                 for observation in self.contributing_observations
             ),
         )
+        object.__setattr__(
+            self,
+            "probability",
+            check_probability(
+                self.probability,
+                "policy branch probability",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "expected_goal_probability",
+            check_probability(
+                self.expected_goal_probability,
+                "policy branch expected goal probability",
+            ),
+        )
+        _check_finite_result(
+            self.expected_action_cost,
+            "policy branch expected action cost",
+            nonnegative=True,
+        )
+        _check_finite_result(
+            self.expected_utility,
+            "policy branch expected utility",
+        )
+        if self.posterior:
+            check_distribution(
+                (probability for _, probability in self.posterior),
+                "policy branch posterior",
+            )
 
     def posterior_marginals(self) -> Dict[str, Dict[object, float]]:
         """Per-variable marginals of :attr:`posterior`."""
@@ -538,6 +793,66 @@ class BeliefPolicyNode:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "action", _immutable_mapping(self.action))
+        object.__setattr__(
+            self,
+            "expected_goal_probability",
+            check_probability(
+                self.expected_goal_probability,
+                "policy node expected goal probability",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "goal_probability_upper_bound",
+            check_probability(
+                self.goal_probability_upper_bound,
+                "policy node goal-probability upper bound",
+            ),
+        )
+        check_bounds(
+            self.expected_goal_probability,
+            self.goal_probability_upper_bound,
+            "policy node goal-probability bounds",
+        )
+        object.__setattr__(
+            self,
+            "retained_observation_probability",
+            check_probability(
+                self.retained_observation_probability,
+                "retained observation probability",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "discarded_observation_probability",
+            check_probability(
+                self.discarded_observation_probability,
+                "discarded observation probability",
+            ),
+        )
+        _check_finite_result(
+            self.immediate_action_cost,
+            "policy node immediate action cost",
+            nonnegative=True,
+        )
+        _check_finite_result(
+            self.expected_action_cost,
+            "policy node expected action cost",
+            nonnegative=True,
+        )
+        _check_finite_result(
+            self.expected_utility,
+            "policy node expected utility",
+        )
+        _check_finite_result(
+            self.utility_upper_bound,
+            "policy node utility upper bound",
+        )
+        check_bounds(
+            self.expected_utility,
+            self.utility_upper_bound,
+            "policy node utility bounds",
+        )
 
     @property
     def observation_schema(self) -> Tuple[str, ...]:
@@ -637,6 +952,16 @@ class BeliefPolicyExecutionStep:
                 for state, probability in self.posterior
             ),
         )
+        if self.posterior:
+            check_distribution(
+                (probability for _, probability in self.posterior),
+                "execution-step posterior",
+            )
+        _check_finite_result(
+            self.accumulated_cost,
+            "execution accumulated cost",
+            nonnegative=True,
+        )
 
     def posterior_marginals(self) -> Dict[str, Dict[object, float]]:
         """Per-variable marginals of :attr:`posterior`."""
@@ -690,6 +1015,10 @@ class BeliefPolicyExecution:
         self._belief = tuple(
             (state, mass / total) for state, mass in weighted if mass > 0.0
         )
+        check_distribution(
+            (probability for _, probability in self._belief),
+            "execution belief",
+        )
         self._policy: Optional[BeliefPolicyNode] = policy
         self._outcome_model = outcome_model
         self._observation_model = observation_model
@@ -739,7 +1068,10 @@ class BeliefPolicyExecution:
 
     def _goal_reached(self) -> bool:
         return bool(self._belief) and all(
-            self._goal_probability(state, self._step)
+            check_probability(
+                self._goal_probability(state, self._step),
+                "execution goal probability",
+            )
             >= 1.0 - 1e-12
             for state, _ in self._belief
         )
@@ -784,11 +1116,16 @@ class BeliefPolicyExecution:
             raise ValueError(
                 "observed execution evidence has zero probability"
             )
-        return tuple(
+        normalized = tuple(
             (state, mass / total)
             for state, mass in combined.values()
             if mass > 0.0
         )
+        check_distribution(
+            (probability for _, probability in normalized),
+            "execution posterior",
+        )
+        return normalized
 
     def advance(
         self,
@@ -933,6 +1270,40 @@ class BeliefActionCertificate:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "action", _immutable_mapping(self.action))
+        for name in (
+            "policy_goal_probability",
+            "policy_goal_probability_upper_bound",
+            "goal_probability_lower_bound",
+            "goal_probability_upper_bound",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                check_probability(
+                    getattr(self, name),
+                    f"action certificate {name}",
+                ),
+            )
+        check_bounds(
+            self.policy_utility_lower_bound,
+            self.policy_utility_upper_bound,
+            "policy utility certificate",
+        )
+        check_bounds(
+            self.utility_lower_bound,
+            self.utility_upper_bound,
+            "belief-composed utility certificate",
+        )
+        check_bounds(
+            self.policy_goal_probability,
+            self.policy_goal_probability_upper_bound,
+            "policy goal-probability certificate",
+        )
+        check_bounds(
+            self.goal_probability_lower_bound,
+            self.goal_probability_upper_bound,
+            "belief-composed goal-probability certificate",
+        )
 
 
 @dataclass(frozen=True)
@@ -956,6 +1327,32 @@ class RobustScenarioEvaluation:
                 _immutable_mapping(observation)
                 for observation in self.minimum_branch_observation_path
             ),
+        )
+        object.__setattr__(
+            self,
+            "expected_goal_probability",
+            check_probability(
+                self.expected_goal_probability,
+                f"scenario {self.scenario!r} goal probability",
+            ),
+        )
+        if self.minimum_branch_goal_probability is not None:
+            object.__setattr__(
+                self,
+                "minimum_branch_goal_probability",
+                check_probability(
+                    self.minimum_branch_goal_probability,
+                    f"scenario {self.scenario!r} branch goal probability",
+                ),
+            )
+        _check_finite_result(
+            self.expected_action_cost,
+            f"scenario {self.scenario!r} action cost",
+            nonnegative=True,
+        )
+        _check_finite_result(
+            self.expected_utility,
+            f"scenario {self.scenario!r} utility",
         )
 
 
@@ -984,10 +1381,78 @@ class RobustPolicyEvaluation:
                 for observation in self.worst_case_branch_observation_path
             ),
         )
+        object.__setattr__(
+            self,
+            "worst_case_goal_probability",
+            check_probability(
+                self.worst_case_goal_probability,
+                "robust policy worst-case goal probability",
+            ),
+        )
+        if self.worst_case_minimum_branch_goal_probability is not None:
+            object.__setattr__(
+                self,
+                "worst_case_minimum_branch_goal_probability",
+                check_probability(
+                    self.worst_case_minimum_branch_goal_probability,
+                    "robust policy worst-case branch probability",
+                ),
+            )
+        _check_finite_result(
+            self.worst_case_expected_utility,
+            "robust policy worst-case utility",
+        )
 
     @property
     def action(self) -> Dict[str, object]:
         return dict(self.policy.action)
+
+
+@dataclass(frozen=True)
+class ConditionalPolicyApproximation:
+    """Grouped approximation and search-scope metadata."""
+
+    kind: str
+    action_ranking: str
+    observation_partition_optimality: Optional[str]
+    constraint_optimality: Optional[str]
+    retained_observation_probability: float
+    pruned_observation_branches: int
+    belief_exact: Optional[bool]
+    belief_retained_probability_mass: Optional[float]
+
+
+@dataclass(frozen=True)
+class ConditionalPolicyCertificate:
+    """Grouped utility, reliability, and root-action certificate fields."""
+
+    scope: str
+    root_action_certified: bool
+    maximum_regret: float
+    optimal_utility_upper_bound: float
+    actions: Tuple[BeliefActionCertificate, ...]
+    constraint_certification: Optional[str]
+    feasible: Optional[bool]
+    best_achievable_goal_probability: Optional[float]
+    best_achievable_goal_probability_upper_bound: Optional[float]
+
+
+@dataclass(frozen=True)
+class ConditionalPolicyDiagnostics:
+    """Grouped search counters, frontier diagnostics, and work telemetry."""
+
+    policy_nodes: int
+    outcome_branches: int
+    observation_branches: int
+    generated_observation_branches: int
+    pruned_observation_branches: int
+    generated_frontier_points: int
+    retained_frontier_points: int
+    maximum_frontier_size: int
+    truncated_frontier_nodes: int
+    frontier_saturation_by_depth: Tuple[Tuple[int, int], ...]
+    frontier_saturated_root_actions: Tuple[object, ...]
+    work: Optional[PlanningWorkReport]
 
 
 @dataclass(frozen=True)
@@ -1062,14 +1527,187 @@ class ConditionalBeliefPolicyResult:
     robust_best_achievable_min_branch_goal_probability: Optional[
         float
     ] = None
+    work: Optional[PlanningWorkReport] = None
     _execution_context: Optional[
         _BeliefPolicyExecutionContext
     ] = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not self.evaluations or not self.action_certificates:
+            raise ModeNexusInvariantError(
+                "conditional result must include evaluations and "
+                "action certificates"
+            )
+        object.__setattr__(
+            self,
+            "retained_observation_probability",
+            check_probability(
+                self.retained_observation_probability,
+                "conditional retained observation probability",
+            ),
+        )
+        for name in (
+            "policy_node_count",
+            "outcome_branch_count",
+            "observation_branch_count",
+            "generated_observation_branch_count",
+            "pruned_observation_branch_count",
+            "generated_frontier_points",
+            "retained_frontier_points",
+            "maximum_frontier_size",
+            "truncated_frontier_nodes",
+            "robust_candidate_count",
+        ):
+            if getattr(self, name) < 0:
+                raise ModeNexusInvariantError(
+                    f"conditional result {name} must be non-negative"
+                )
+        for name in ("maximum_regret", "policy_maximum_regret"):
+            value = float(getattr(self, name))
+            if math.isnan(value) or value < 0.0:
+                raise ModeNexusInvariantError(
+                    f"conditional result {name} must be non-negative"
+                )
+        if self.root_action_certified != (
+            self.maximum_regret <= 1e-12
+        ):
+            raise ModeNexusInvariantError(
+                "root_action_certified is inconsistent with maximum_regret"
+            )
+        if self.policy_root_action_certified != (
+            self.policy_maximum_regret <= 1e-12
+        ):
+            raise ModeNexusInvariantError(
+                "policy_root_action_certified is inconsistent with "
+                "policy_maximum_regret"
+            )
+        if self.action_ranking in ("exact", "certified") and (
+            not self.root_action_certified
+        ):
+            raise ModeNexusInvariantError(
+                f"action_ranking={self.action_ranking!r} requires a "
+                "certified root action"
+            )
+        if self.action_ranking == "exact" and self.approximation != "exact":
+            raise ModeNexusInvariantError(
+                "exact action ranking requires approximation='exact'"
+            )
+        selected = self.action_certificates[0]
+        check_bounds(
+            selected.utility_lower_bound,
+            self.optimal_utility_upper_bound,
+            "selected action versus optimal utility upper bound",
+            allow_infinite=True,
+        )
+        for name in (
+            "goal_probability_constraint",
+            "branch_goal_probability_constraint",
+            "best_achievable_goal_probability",
+            "best_achievable_goal_probability_upper_bound",
+            "worst_case_goal_probability",
+            "robust_best_achievable_min_goal_probability",
+            "worst_case_minimum_branch_goal_probability",
+            "robust_best_achievable_min_branch_goal_probability",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    name,
+                    check_probability(
+                        value,
+                        f"conditional result {name}",
+                    ),
+                )
+        if (
+            self.best_achievable_goal_probability is not None
+            and self.best_achievable_goal_probability_upper_bound is not None
+        ):
+            check_bounds(
+                self.best_achievable_goal_probability,
+                self.best_achievable_goal_probability_upper_bound,
+                "best achievable goal-probability bounds",
+            )
+        if self.constraint_certification not in (
+            None,
+            "certified-feasible",
+            "certified-infeasible",
+            "indeterminate",
+        ):
+            raise ModeNexusInvariantError(
+                "unknown constraint certification "
+                f"{self.constraint_certification!r}"
+            )
 
     @property
     def action(self) -> Dict[str, object]:
         """Root action selected after valuing conditional continuations."""
         return dict(self.policy.action)
+
+    @property
+    def approximation_details(self) -> ConditionalPolicyApproximation:
+        """Return grouped approximation metadata."""
+        return ConditionalPolicyApproximation(
+            kind=self.approximation,
+            action_ranking=self.action_ranking,
+            observation_partition_optimality=(
+                self.observation_partition_optimality
+            ),
+            constraint_optimality=self.constraint_optimality,
+            retained_observation_probability=(
+                self.retained_observation_probability
+            ),
+            pruned_observation_branches=(
+                self.pruned_observation_branch_count
+            ),
+            belief_exact=self.belief_exact,
+            belief_retained_probability_mass=(
+                self.belief_retained_probability_mass
+            ),
+        )
+
+    @property
+    def certificate(self) -> ConditionalPolicyCertificate:
+        """Return grouped certificate fields."""
+        return ConditionalPolicyCertificate(
+            scope=self.certificate_scope,
+            root_action_certified=self.root_action_certified,
+            maximum_regret=self.maximum_regret,
+            optimal_utility_upper_bound=self.optimal_utility_upper_bound,
+            actions=self.action_certificates,
+            constraint_certification=self.constraint_certification,
+            feasible=self.feasible,
+            best_achievable_goal_probability=(
+                self.best_achievable_goal_probability
+            ),
+            best_achievable_goal_probability_upper_bound=(
+                self.best_achievable_goal_probability_upper_bound
+            ),
+        )
+
+    @property
+    def diagnostics(self) -> ConditionalPolicyDiagnostics:
+        """Return grouped search and frontier diagnostics."""
+        return ConditionalPolicyDiagnostics(
+            policy_nodes=self.policy_node_count,
+            outcome_branches=self.outcome_branch_count,
+            observation_branches=self.observation_branch_count,
+            generated_observation_branches=(
+                self.generated_observation_branch_count
+            ),
+            pruned_observation_branches=(
+                self.pruned_observation_branch_count
+            ),
+            generated_frontier_points=self.generated_frontier_points,
+            retained_frontier_points=self.retained_frontier_points,
+            maximum_frontier_size=self.maximum_frontier_size,
+            truncated_frontier_nodes=self.truncated_frontier_nodes,
+            frontier_saturation_by_depth=self.frontier_saturation_by_depth,
+            frontier_saturated_root_actions=(
+                self.frontier_saturated_root_actions
+            ),
+            work=self.work,
+        )
 
     def execution(
         self,
@@ -1412,6 +2050,124 @@ class CompiledPlanner:
             total_cost=total_cost,
         )
 
+    def estimate_belief_work(
+        self,
+        initial_belief_states: int,
+        *,
+        actions: Optional[Sequence[object]] = None,
+        conditional: bool = False,
+        outcome_branching_hint: Optional[int] = None,
+        observation_branching_hint: Optional[int] = None,
+        scenario_count: int = 1,
+        scalarized_searches: int = 1,
+        max_action_sequences: Optional[int] = None,
+        max_policy_nodes: Optional[int] = None,
+        max_outcome_branches: Optional[int] = None,
+        max_observation_branches: Optional[int] = None,
+        max_frontier_points: Optional[int] = None,
+    ) -> PlanningWorkEstimate:
+        """Estimate structural planning work without invoking callbacks.
+
+        Branching hints are per callback invocation. Estimates involving
+        those hints are provisioning guides, not hard upper bounds.
+        """
+        if (
+            not isinstance(initial_belief_states, int)
+            or isinstance(initial_belief_states, bool)
+            or initial_belief_states < 1
+        ):
+            raise ValueError("initial_belief_states must be at least 1")
+        command_name = self.command_names[0]
+        command_var = self.system.vars[f"{command_name}@0"]
+        action_values = tuple(
+            command_var.values if actions is None else actions
+        )
+        action_count = len(action_values)
+        if action_count < 1:
+            raise ValueError("actions must not be empty")
+        for action in action_values:
+            command_var._index(action)
+        for name, value in (
+            ("outcome_branching_hint", outcome_branching_hint),
+            ("observation_branching_hint", observation_branching_hint),
+            ("scenario_count", scenario_count),
+            ("scalarized_searches", scalarized_searches),
+        ):
+            if value is not None and (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 1
+            ):
+                raise ValueError(f"{name} must be at least 1")
+        for name, value, minimum in (
+            ("max_action_sequences", max_action_sequences, 1),
+            ("max_policy_nodes", max_policy_nodes, 1),
+            ("max_outcome_branches", max_outcome_branches, 1),
+            ("max_observation_branches", max_observation_branches, 1),
+            ("max_frontier_points", max_frontier_points, 2),
+        ):
+            if value is not None and (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < minimum
+            ):
+                raise ValueError(f"{name} must be at least {minimum}")
+
+        action_sequences = action_count ** self.horizon
+        estimated_policy_nodes = None
+        estimated_outcome_branches = None
+        estimated_observation_branches = None
+        if conditional and (
+            outcome_branching_hint is not None
+            and observation_branching_hint is not None
+        ):
+            branch_factor = (
+                outcome_branching_hint * observation_branching_hint
+            )
+            belief_nodes = sum(
+                branch_factor ** depth for depth in range(self.horizon)
+            )
+            estimated_policy_nodes = (
+                scalarized_searches * action_count * belief_nodes
+            )
+            estimated_outcome_branches = (
+                estimated_policy_nodes
+                * initial_belief_states
+                * outcome_branching_hint
+            )
+            estimated_observation_branches = (
+                estimated_outcome_branches
+                * observation_branching_hint
+            )
+        elif not conditional and outcome_branching_hint is not None:
+            estimated_outcome_branches = (
+                scalarized_searches
+                * initial_belief_states
+                * action_sequences
+                * self.horizon
+                * outcome_branching_hint
+            )
+
+        return PlanningWorkEstimate(
+            horizon=self.horizon,
+            action_count=action_count,
+            initial_belief_states=initial_belief_states,
+            action_sequences=action_sequences,
+            conditional=conditional,
+            outcome_branching_hint=outcome_branching_hint,
+            observation_branching_hint=observation_branching_hint,
+            scenario_count=scenario_count,
+            scalarized_searches=scalarized_searches,
+            estimated_policy_nodes=estimated_policy_nodes,
+            estimated_outcome_branches=estimated_outcome_branches,
+            estimated_observation_branches=estimated_observation_branches,
+            max_action_sequences=max_action_sequences,
+            max_policy_nodes=max_policy_nodes,
+            max_outcome_branches=max_outcome_branches,
+            max_observation_branches=max_observation_branches,
+            max_frontier_points=max_frontier_points,
+        )
+
     # -- queries ---------------------------------------------------------
     def plan(
         self,
@@ -1699,8 +2455,18 @@ class CompiledPlanner:
             raise ValueError("actions must not be empty")
         for action in action_values:
             command_var._index(action)
+        session.work_estimate = self.estimate_belief_work(
+            len(checked_states),
+            actions=action_values,
+            conditional=observation_model is not None,
+            max_action_sequences=max_action_sequences,
+            max_policy_nodes=max_policy_nodes,
+            max_outcome_branches=max_outcome_branches,
+            max_observation_branches=max_observation_branches,
+            max_frontier_points=max_frontier_points,
+        )
         if self.horizon > 1:
-            sequence_count = len(action_values) ** self.horizon
+            sequence_count = session.work_estimate.action_sequences
             if sequence_count > max_action_sequences:
                 raise PlanningBudgetExceeded(
                     f"belief lookahead requires {sequence_count} action "
@@ -1728,6 +2494,7 @@ class CompiledPlanner:
             evidence: Dict[str, object],
             target_step: Optional[int] = None,
         ) -> float:
+            session.goal_probability_queries += 1
             if target_step is None:
                 target_step = self.horizon
             log_denominator = self.system.log_evidence(evidence)
@@ -1745,7 +2512,10 @@ class CompiledPlanner:
             log_numerator = self.system.log_evidence(with_goal)
             if log_numerator == -math.inf:
                 return 0.0
-            return min(1.0, math.exp(log_numerator - log_denominator))
+            return check_probability(
+                math.exp(log_numerator - log_denominator),
+                "planner conditional goal probability",
+            )
 
         def action_cost(action: object, command: Dict[str, object]) -> float:
             if action_costs is None:
@@ -1826,6 +2596,7 @@ class CompiledPlanner:
         ) -> List[Tuple[Dict[str, object], float]]:
             if outcome_model is None:
                 raise RuntimeError("normalized_outcomes needs outcome_model")
+            session.outcome_callback_calls += 1
             outcomes = list(outcome_model(dict(state), dict(command)))
             return checked_probability_distribution(
                 outcomes,
@@ -1840,6 +2611,7 @@ class CompiledPlanner:
                 raise RuntimeError(
                     "normalized_observations needs observation_model"
                 )
+            session.observation_callback_calls += 1
             supplied = observation_model(dict(state), dict(command))
             if isinstance(supplied, Mapping):
                 observations = [(supplied, 1.0)]
@@ -1917,6 +2689,7 @@ class CompiledPlanner:
                 """Count one policy node and expand this action's validated
                 stochastic outcomes over the belief."""
                 counters["policy_nodes"] += 1
+                session.action_evaluations += 1
                 sync_session()
                 session.check()
                 if counters["policy_nodes"] > max_policy_nodes:
@@ -2944,7 +3717,7 @@ class CompiledPlanner:
                     if is_approximate
                     else "exact"
                 )
-            session.finish()
+            final_stats = session.finish()
             return ConditionalBeliefPolicyResult(
                 policy=best_policy,
                 evaluations=root_evaluations,
@@ -3009,6 +3782,7 @@ class CompiledPlanner:
                     supplied_retained_mass
                 ),
                 certificate_scope=certificate_scope,
+                work=final_stats.work_report(),
                 _execution_context=_BeliefPolicyExecutionContext(
                     initial_belief=tuple(
                         (dict(state), probability)
@@ -3044,6 +3818,7 @@ class CompiledPlanner:
                 action_values, repeat=self.horizon
             ):
                 session.check()
+                session.action_evaluations += 1
                 commands = tuple(
                     {command_name: action} for action in action_sequence
                 )
@@ -3184,7 +3959,7 @@ class CompiledPlanner:
                 }
             else:
                 best_sequence = sequence_evaluations[0]
-            session.finish()
+            final_stats = session.finish()
             return BeliefPolicyResult(
                 commands=tuple(
                     dict(command) for command in best_sequence.commands
@@ -3198,12 +3973,14 @@ class CompiledPlanner:
                     best_sequence.expected_goal_probabilities
                 ),
                 evaluations=tuple(sequence_evaluations),
+                work=final_stats.work_report(),
                 **sequence_extras,
             )
 
         evaluations: List[BeliefActionEvaluation] = []
         for action in action_values:
             session.check()
+            session.action_evaluations += 1
             command = {command_name: action}
             expected_goal = 0.0
             for state, state_mass in checked_states:
@@ -3288,13 +4065,14 @@ class CompiledPlanner:
             )
         else:
             execution_certificate_scope = "caller-supplied-belief"
-        session.finish()
+        final_stats = session.finish()
         return BeliefPlanResult(
             action=dict(best.action),
             expected_goal_probability=best.expected_goal_probability,
             action_cost=best.action_cost,
             expected_utility=best.expected_utility,
             evaluations=tuple(evaluations),
+            work=final_stats.work_report(),
             _execution_context=_BeliefPolicyExecutionContext(
                 initial_belief=tuple(
                     (dict(state), probability)
@@ -3350,6 +4128,7 @@ class CompiledPlanner:
         supplied_outcome_model,
     ) -> ConditionalBeliefPolicyResult:
         """Generate and audit common policies over finite outcome scenarios."""
+        robust_started = time.monotonic()
         if supplied_outcome_model is not None:
             raise ValueError(
                 "supply either outcome_model or outcome_scenarios, not both"
@@ -3435,6 +4214,18 @@ class CompiledPlanner:
                 f"increase max_robust_candidates={max_robust_candidates} "
                 "or lower the resolution"
             )
+        robust_work_estimate = self.estimate_belief_work(
+            len(original_belief),
+            actions=actions,
+            conditional=True,
+            scenario_count=len(scenarios),
+            scalarized_searches=required_calls,
+            max_action_sequences=max_action_sequences,
+            max_policy_nodes=max_policy_nodes,
+            max_outcome_branches=max_outcome_branches,
+            max_observation_branches=max_observation_branches,
+            max_frontier_points=max_frontier_points,
+        )
 
         def visible_state(state):
             return {
@@ -3483,6 +4274,7 @@ class CompiledPlanner:
 
         candidate_sources = {}
         candidate_weights = {}
+        generation_work = []
         for counts in weight_counts:
             weights = tuple(
                 (
@@ -3540,11 +4332,22 @@ class CompiledPlanner:
                         "scenario-robust planning expected a conditional "
                         "policy result"
                     )
+                if result.work is not None:
+                    generation_work.append(result.work)
                 signature = policy_signature(result.policy)
                 candidate_sources.setdefault(signature, result)
                 candidate_weights.setdefault(signature, weights)
 
         command_name = self.command_names[0]
+        audit_work = {
+            "action_evaluations": 0,
+            "goal_probability_queries": 0,
+            "policy_nodes": 0,
+            "outcome_callback_calls": 0,
+            "outcome_branches": 0,
+            "observation_callback_calls": 0,
+            "observation_branches": 0,
+        }
 
         def checked_distribution(entries, *, label):
             checked = []
@@ -3604,6 +4407,7 @@ class CompiledPlanner:
             return evidence
 
         def goal_probability(state, step):
+            audit_work["goal_probability_queries"] += 1
             evidence = state_evidence(state, step, observables=True)
             denominator = self.system.log_evidence(evidence)
             if denominator == -math.inf:
@@ -3612,27 +4416,35 @@ class CompiledPlanner:
                     f"planner: {state}"
                 )
             numerator_evidence = dict(evidence)
-            numerator_evidence.update(
-                {
-                    f"{name}@{step}": value
-                    for name, value in target.items()
-                }
-            )
+            for name, value in target.items():
+                key = f"{name}@{step}"
+                if (
+                    key in numerator_evidence
+                    and numerator_evidence[key] != value
+                ):
+                    return 0.0
+                numerator_evidence[key] = value
             numerator = self.system.log_evidence(numerator_evidence)
             if numerator == -math.inf:
                 return 0.0
-            return min(1.0, math.exp(numerator - denominator))
+            return check_probability(
+                math.exp(numerator - denominator),
+                "robust planner goal probability",
+            )
 
         def normalized_observations(state, command):
+            audit_work["observation_callback_calls"] += 1
             supplied = observation_model(dict(state), dict(command))
             entries = (
                 [(supplied, 1.0)]
                 if isinstance(supplied, Mapping)
                 else list(supplied)
             )
-            return checked_distribution(
+            checked = checked_distribution(
                 entries, label="observation"
             )
+            audit_work["observation_branches"] += len(checked)
+            return checked
 
         def audit_policy(policy, model):
             weighted = []
@@ -3663,6 +4475,8 @@ class CompiledPlanner:
                 if not active_belief:
                     return reached_mass, 0.0, []
 
+                audit_work["action_evaluations"] += 1
+                audit_work["policy_nodes"] += 1
                 command = dict(node.action)
                 action = command[command_name]
                 active_mass = sum(
@@ -3673,10 +4487,12 @@ class CompiledPlanner:
                 )
                 expanded = []
                 for state, state_mass in active_belief:
+                    audit_work["outcome_callback_calls"] += 1
                     outcomes = checked_distribution(
                         list(model(dict(state), dict(command))),
                         label="outcome",
                     )
+                    audit_work["outcome_branches"] += len(outcomes)
                     for updates, probability in outcomes:
                         next_state = dict(state)
                         next_state.update(updates)
@@ -4019,6 +4835,58 @@ class CompiledPlanner:
                     else "indeterminate"
                 ),
             }
+        robust_work = PlanningWorkReport(
+            estimate=robust_work_estimate,
+            elapsed_seconds=time.monotonic() - robust_started,
+            action_evaluations=(
+                sum(item.action_evaluations for item in generation_work)
+                + audit_work["action_evaluations"]
+            ),
+            goal_probability_queries=(
+                sum(
+                    item.goal_probability_queries
+                    for item in generation_work
+                )
+                + audit_work["goal_probability_queries"]
+            ),
+            policy_nodes=(
+                sum(item.policy_nodes for item in generation_work)
+                + audit_work["policy_nodes"]
+            ),
+            outcome_callback_calls=(
+                sum(
+                    item.outcome_callback_calls
+                    for item in generation_work
+                )
+                + audit_work["outcome_callback_calls"]
+            ),
+            outcome_branches=(
+                sum(item.outcome_branches for item in generation_work)
+                + audit_work["outcome_branches"]
+            ),
+            observation_callback_calls=(
+                sum(
+                    item.observation_callback_calls
+                    for item in generation_work
+                )
+                + audit_work["observation_callback_calls"]
+            ),
+            observation_branches=(
+                sum(
+                    item.observation_branches
+                    for item in generation_work
+                )
+                + audit_work["observation_branches"]
+            ),
+            generated_frontier_points=sum(
+                item.generated_frontier_points
+                for item in generation_work
+            ),
+            retained_frontier_points=sum(
+                item.retained_frontier_points
+                for item in generation_work
+            ),
+        )
         return replace(
             selected_source,
             action_ranking="heuristic",
@@ -4067,6 +4935,7 @@ class CompiledPlanner:
             robust_best_achievable_min_branch_goal_probability=(
                 robust_best_branch
             ),
+            work=robust_work,
             _execution_context=_BeliefPolicyExecutionContext(
                 initial_belief=tuple(
                     (dict(state), float(mass))

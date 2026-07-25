@@ -8,10 +8,11 @@ GPU evaluation and autograd-powered marginals.
 The architecture follows the knowledge-compilation approach used in
 DNNF-based diagnosis at NASA JPL: encode a system model (component modes
 with priors, observables, expectations) into logic, compile **once**
-offline into a small circuit, then answer observation queries **online** in
-time linear in circuit size — including enumerating complete system states
-ordered from most to least probable, with leaf weights read as negative
-log probabilities. See [docs/DESIGN.md](docs/DESIGN.md) for the full
+offline into a circuit, then answer observation queries **online** over that
+materialized structure — including enumerating complete system states
+ordered from most to least probable. Compilation can be exponential on
+densely coupled models; controls and statistics make that cost visible.
+See [docs/DESIGN.md](docs/DESIGN.md) for the full
 technical treatment, [CONTRACTS.md](CONTRACTS.md) for exactness, invariant,
 certificate, and complexity claims, and
 [docs/FUTURE_WORK.md](docs/FUTURE_WORK.md) for the roadmap from next steps to
@@ -54,10 +55,9 @@ for cost, model in modenexus.enumerate_models(circuit, costs, k=5):
     print(cost, model)
 ```
 
-For acyclic unary/binary CNFs, the default compiler uses exact tree dynamic
-programming, so chain- and forest-structured inputs compile in time and
-space linear in their structure. Wider or cyclic theories automatically use
-the general component-caching DPLL compiler. `Circuit.condition(evidence)`
+For acyclic unary/binary CNFs, the default compiler uses a specialized tree
+dynamic-programming path. Wider or cyclic theories use the general
+component-caching DPLL compiler. `Circuit.condition(evidence)`
 asserts the evidence in its returned circuit, so later `smooth()`, counting,
 MPE, and enumeration cannot re-free conditioned variables.
 
@@ -98,20 +98,18 @@ system = m.compile()                                   # offline
 for d in system.diagnoses({"flow1": False, "flow2": True}, k=3):  # online
     print(d)                # ranked by best supporting state (MPE)
 for d in system.map_diagnoses({"flow1": False}, k=3):
-    print(d)                # ranked by exact summed posterior (marginal MAP)
-system.mode_posteriors({"flow1": False})   # exact P(mode=value | evidence)
+    print(d)                # ranked by summed posterior (marginal MAP)
+system.mode_posteriors({"flow1": False})   # P(mode=value | evidence)
 ```
 
-`map_diagnoses` is exact marginal MAP — mode variables are branched first
-during compilation (`modes_first=True`, the default), which constrains the
-circuit so that max-over-modes / sum-over-everything-else is a single
-sweep plus lazy k-best enumeration.
+`map_diagnoses` uses marginal-MAP semantics. Mode variables are branched
+first during compilation (`modes_first=True`, the default), which may make
+the offline circuit much larger on densely coupled models.
 
 The diagnosis stack runs on a **native finite-domain core** (`modenexus.fd`):
 variables carry their domains directly, circuit leaves are atomic
 assignments like `valve1=stuck_closed`, and decision nodes branch d-ways —
-no one-hot encoding, no exactly-one clauses, ~40% smaller circuits on
-mode-heavy models than the boolean lowering. Continuous quantities can be
+without a public one-hot encoding. Continuous quantities can be
 **quantized into bounded ranges** with threshold atoms and automatic
 bucketing of numeric evidence:
 
@@ -125,49 +123,24 @@ system.log_evidence({"level": 37.2})  # numeric evidence, bucketed for you
 Compiled systems are also **generative and learnable**:
 
 ```python
-state = system.sample_state(rng)         # exact simulation from the model
+state = system.sample_state(rng)         # sample from the compiled model
 telemetry = [{"alarm": system.sample_state(rng)["alarm"]}
              for _ in range(4000)]
 system.fit_priors(telemetry)             # EM: learn failure rates from
                                          # partially observed telemetry
-system.posteriors(evidence, names=[...]) # exact marginals for any variable
-system.save("plant.json")                # single-allocation reload:
-                                         # header states all bounds up front
+system.posteriors(evidence, names=[...]) # variable marginals
+system.save("plant.json")                # save a reloadable artifact
 ```
 
-`fit_priors` is exact expectation-maximization on the circuit (E-step:
-WMC-ratio posteriors; M-step: average), with a guaranteed non-decreasing
-likelihood — failure priors estimated from fleet data instead of
-engineering guesses, with the logical model as a hard constraint.
+`fit_priors` updates categorical priors from partial telemetry and returns
+the likelihood trace for convergence monitoring.
 
 Sensors can be noisy (`m.sensor("alarm", expr, false_positive=0.1,
-false_negative=0.2)`), and `modenexus.ModeTracker` runs the monitoring loop:
-per-mode transition matrices, observations each timestep, and a
-beam-filtered belief over joint mode assignments (exact HMM filtering when
-the beam covers the mode space — see `examples/home_battery.py` for a
-degrading-battery week of telemetry, and `docs/MODELING_NOTES.md` for
-ergonomics findings from that experiment). `ModeTracker(system, exact=True)`
-computes the required joint-state capacity automatically, guarded by
-`max_exact_states`; approximate trackers expose `last_step_info` with
-expansion/beam truncation and retained-mass diagnostics.
-`ModeTracker.belief()` returns a list-compatible `TrackedBelief` carrying
-exactness and retained-mass metadata, so downstream planners can distinguish
-an exact posterior from a normalized truncated beam. `copy()` and slicing
-preserve that metadata, in-place mutation invalidates it, and `list(belief)`
-is the explicit way to drop it — a routine container operation can no longer
-flip a certificate.
-For adaptive deployments, construct the tracker with
-`retain_history=True`. `tracker.refine(beam=..., expand=...)` returns a
-fresh tracker rebuilt from the original prior and all retained evidence and
-per-step transition overrides; it does not mutate a truncated belief or
-pretend discarded trajectories can be recovered in place.
-`tracker.refine_until(evaluate, accept, ...)` evaluates the current belief,
-replays at an explicit or geometrically increasing resource schedule, and
-stops when the caller's certificate or regret predicate succeeds. Its result
-records every attempted beam, replayed-step and generated-candidate counts,
-replay and evaluation time, retained mass, and any downstream
-`certificate_scope` and `maximum_regret`.
-The default final attempt is exact, subject to `max_exact_states`.
+false_negative=0.2)`), and `modenexus.ModeTracker` maintains a beam-filtered
+belief as observations arrive. `TrackedBelief` carries approximation
+metadata, while `retain_history`, `refine`, and `refine_until` support
+measured replay at larger resource settings. See
+[`CONTRACTS.md`](CONTRACTS.md) for exactness and retained-mass semantics.
 
 Beyond ranked diagnoses: `value_of_information` scores which sensor to
 read next (expected entropy reduction, in nats),
@@ -180,17 +153,31 @@ The existing `plan()` and `estimate()` tuple APIs remain compact;
 trajectory and a breakdown of initial-state, per-transition, hard-evidence,
 and other model costs.
 
-For one-step decisions under uncertainty, `plan_belief()` accepts the
-correlated joint distribution returned by `ModeTracker.belief()` and ranks
-actions by exact expected goal probability or expected utility. Applications
-may supply stochastic action outcomes and separate operational costs;
-outcome and observation callback probabilities must sum to 1 (within
-`1e-6`), so a forgotten branch fails loudly instead of being silently
-renormalized. An optional `PlanControl` adds cooperative
-timeout/deadline limits, a cancellation callback, and progress snapshots
-(`PlanningStats`) mirroring `CompileControl`; interrupted searches raise
-`PlanningCancelled`/`PlanningBudgetExceeded` carrying the partial counts
-and best root action found so far.
+For decisions under uncertainty, `plan_belief()` accepts a correlated joint
+belief and optional outcome, observation, and action-cost callbacks.
+`PlanControl` adds cooperative limits, cancellation, and progress snapshots.
+`estimate_belief_work()` provides a callback-free preflight estimate, and
+completed results expose measured work counters.
+
+```python
+estimate = compiled_planner.estimate_belief_work(
+    initial_belief_states=len(belief),
+    actions=("wait", "repair"),
+    conditional=True,
+    outcome_branching_hint=2,
+    observation_branching_hint=3,
+    max_policy_nodes=100_000,
+)
+result = compiled_planner.plan_belief(
+    belief,
+    target,
+    outcome_model=outcomes,
+    observation_model=observations,
+)
+print(estimate.estimated_policy_nodes)  # preflight structural estimate
+print(result.work)                      # measured completed-search work
+```
+
 On planners compiled with a longer horizon, it performs bounded lookahead
 over command sequences, propagates stochastic outcome branches, and returns
 the best `BeliefPolicyResult`; sequence and branch budgets make the
@@ -224,76 +211,19 @@ observation, posterior-state, and certificate mappings cannot be changed
 without constructing a new result. Convenience properties such as
 `result.action` return mutable defensive copies for execution.
 
-For noisy sensors with many low-probability readings, set
-`min_observation_probability` and/or `max_observations_per_node`. Pruned
-readings are merged into an optimized fallback posterior rather than
-dropped and exposed as `fallback_branch` with its aggregate posterior and
-contributing observations; well-formed readings matching no retained branch
-route through that fallback. Results report generated and pruned branches,
-retained/discarded observation probability, whether action ranking is
-heuristic or certified, and whether the returned utility is a lower bound
-on the exact full-observation optimum. Every evaluated root action exposes
-utility lower and upper bounds. The overall result reports the unrestricted
-optimal-utility upper bound and maximum root-action regret; the root action
-is certified when its lower bound dominates every alternative upper bound.
-For hard reliability requirements, `min_goal_probability` turns the floor
-into a first-class chance constraint: feasibility is decided before utility
-ranks the survivors, and in conditional planning the constraint is enforced
-across the whole policy tree by Pareto-frontier lookahead — reliability
-bought in one observation branch can compensate for another branch's
-ceiling, which no per-node threshold can express.
-`min_branch_goal_probability` adds the stricter per-branch safety variant.
-An unreachable floor is reported (`feasible=False` with
-`best_achievable_goal_probability`), never silently degraded, and
-`constraint_certification` composes pruning and tracker mass into
-certified-feasible / certified-infeasible / indeterminate.
-`best_achievable_goal_probability_scope` distinguishes a full-observation
-ceiling from one computed inside the selected observation coarsening, while
-`observation_partition_optimality` distinguishes that heuristic choice from
-Pareto-frontier exactness. A pruned result also exposes
-`best_achievable_goal_probability_upper_bound` for the unrestricted
-observation-policy space.
-Every active whole-policy and branch floor participates in that combined
-status. When observation pruning merges raw readings, a branch-floor result
-is conservatively `indeterminate` rather than certifying aggregate fallback
-performance as per-reading safety.
+For noisy or highly branching observations, use
+`min_observation_probability`, `max_observations_per_node`, and
+`max_frontier_points`. Reliability requirements use
+`min_goal_probability` and `min_branch_goal_probability`. The result groups
+the relevant fields under `approximation_details`, `certificate`, and
+`diagnostics`, while retaining the original flat attributes for
+compatibility. Detailed bound and certification relationships live in
+[`CONTRACTS.md`](CONTRACTS.md).
 
-When `max_frontier_points` binds, `ConditionalBeliefPolicyResult` and
-`PlanningStats` expose generated/retained point totals, the largest
-nondominated pre-cap frontier, truncated-node count, saturation by depth and
-root action, and a conservative feasible-utility upper bound and optimality
-gap. This makes the exponential frontier work measurable and provisionable
-without implying that truncation invalidates feasibility endpoints.
-
-For a finite uncertainty set, replace `outcome_model` with
-`outcome_scenarios={"mean": mean_model, "stress": stress_model}` and set
-`robust_objective="maximin"`. The planner generates common conditional
-policies over a positive scenario-weight grid, independently executes each
-candidate under every named outcome model, and reports per-scenario
-probability, cost, utility, worst-case metrics, robust feasibility, and the
-complete bounded candidate portfolio. `robust_weight_resolution` controls
-grid density, while `max_robust_candidates` caps the number of scalarized
-planner calls before work begins. Results say
-`robust_optimality="weight-grid-heuristic"` and
-`certificate_scope="robust-scenario-weight-grid"`: the computation is
-explicitly bounded and does not claim global robust-policy optimality.
-Inherited `expected_*` fields retain the scenario-weighted values that
-generated the selected candidate; `inherited_metric_scope` labels that
-contract and `selected_scenario_weights` makes the mixture directly
-reconstructible.
-
-The same robust call accepts `min_branch_goal_probability`. Every generated
-common policy is replayed under each named scenario to report the minimum
-continuation probability, limiting scenario and observation path, numeric
-branch feasibility, and best branch floor found on the weight grid. A
-branch-safe policy is selected before maximin utility. Observation fallback
-pruning keeps `robust_branch_constraint_certification="indeterminate"` even
-when the audited aggregate policy meets the numeric floor.
-
-Conditional policy costs stop accumulating on physical paths whose target is
-already satisfied. When noisy telemetry mixes satisfied and unresolved
-states into one posterior, only unresolved posterior mass is charged for the
-continuation action; goal probability retains both portions.
+For a finite uncertainty set, use `outcome_scenarios` with
+`robust_objective="maximin"`. `robust_weight_resolution` and
+`max_robust_candidates` bound the scenario-weight search; results include
+per-scenario audits and the selected search scope.
 
 For real execution, create a stateful runner from a conditional or one-step
 belief planning result:
@@ -316,10 +246,8 @@ belief even on terminal paths, where no observation branch was constructed.
 For robust results, pass `outcome_scenario="name"` (or an explicit
 `outcome_model`) to select the physical model used during execution.
 
-When the input is a `TrackedBelief`, the planner composes tracker uncertainty
-into separate end-to-end action bounds. Results preserve the policy-only
-certificate, report certificate scope, and refuse to present a beam-only
-certificate as end-to-end when tracker mass is unknown.
+When the input is a `TrackedBelief`, result metadata records how tracker
+approximation participates in planning scope.
 
 ## GPU / batched evaluation (PyTorch)
 

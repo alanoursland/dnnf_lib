@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from .invariants import ModeNexusInvariantError
+
+
 # Node kinds
 FALSE = 0
 TRUE = 1
@@ -175,7 +178,20 @@ class Circuit:
             b.literal(var if value else -var)
             for var, value in sorted(assignment.items())
         ]
-        return b.finish(b.and_([new_id[self.root], *asserted]))
+        conditioned = b.finish(b.and_([new_id[self.root], *asserted]))
+        if conditioned.kinds[conditioned.root] != FALSE:
+            root_assertions = conditioned.asserted_literals()[
+                conditioned.root
+            ]
+            expected = {
+                var if value else -var
+                for var, value in assignment.items()
+            }
+            if not expected <= root_assertions:
+                raise ModeNexusInvariantError(
+                    "conditioned circuit did not retain all evidence literals"
+                )
+        return conditioned
 
     def smooth(self) -> "Circuit":
         """Return the smoothed form used by counting evaluators."""
