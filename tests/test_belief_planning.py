@@ -734,6 +734,12 @@ def test_scenario_robust_maximin_reports_per_scenario_metrics():
     assert result.robust_objective == "maximin"
     assert result.robust_optimality == "weight-grid-heuristic"
     assert result.certificate_scope == "robust-scenario-weight-grid"
+    assert result.inherited_metric_scope == (
+        "scenario-weighted-candidate-generation"
+    )
+    assert dict(result.selected_scenario_weights) == pytest.approx(
+        {"favorable": 0.25, "adverse": 0.75}
+    )
     assert result.robust_candidate_count >= 1
     assert len(result.robust_scenario_evaluations) == 2
     assert result.worst_case_scenario in {"favorable", "adverse"}
@@ -765,6 +771,85 @@ def test_scenario_robust_maximin_reports_per_scenario_metrics():
     assert result.worst_case_goal_probability == pytest.approx(
         result.robust_best_achievable_min_goal_probability
     )
+
+
+def test_scenario_robust_branch_floor_is_audited_per_scenario():
+    def favorable(state, command):
+        action = command["action"]
+        if state["mode"] == "bad" and action in {"cheap", "sure"}:
+            success = 0.99 if action == "cheap" else 0.60
+            return [({"mode": "goal"}, success), ({}, 1 - success)]
+        return [({}, 1.0)]
+
+    def adverse(state, command):
+        action = command["action"]
+        if state["mode"] == "bad" and action in {"cheap", "sure"}:
+            success = 0.10 if action == "cheap" else 0.80
+            return [({"mode": "goal"}, success), ({}, 1 - success)]
+        return [({}, 1.0)]
+
+    result = reliability_planner(horizon=2).plan_belief(
+        belief=[({"mode": "bad"}, 1.0)],
+        target={"done": True},
+        outcome_scenarios={
+            "favorable": favorable,
+            "adverse": adverse,
+        },
+        robust_objective="maximin",
+        robust_weight_resolution=4,
+        max_robust_candidates=10,
+        observation_model=lambda state, command: {
+            "mode": state["mode"]
+        },
+        action_costs=RELIABILITY_COSTS,
+        cost_weight=0.5,
+        min_goal_probability=0.75,
+        min_branch_goal_probability=0.75,
+    )
+
+    assert not result.robust_feasible
+    assert not result.robust_branch_feasible
+    assert result.worst_case_branch_scenario == "favorable"
+    assert result.worst_case_minimum_branch_goal_probability == (
+        pytest.approx(0.60)
+    )
+    assert result.robust_best_achievable_min_branch_goal_probability == (
+        pytest.approx(0.60)
+    )
+    assert result.worst_case_branch_observation_path == (
+        {"mode": "bad"},
+    )
+    with pytest.raises(TypeError):
+        result.worst_case_branch_observation_path[0]["mode"] = "goal"
+    assert result.robust_branch_constraint_certification == "indeterminate"
+    assert result.constraint_certification == "indeterminate"
+
+    pruned = reliability_planner(horizon=2).plan_belief(
+        belief=[({"mode": "bad"}, 1.0)],
+        target={"done": True},
+        outcome_scenarios={
+            "favorable": favorable,
+            "adverse": adverse,
+        },
+        robust_objective="maximin",
+        robust_weight_resolution=4,
+        max_robust_candidates=10,
+        observation_model=lambda state, command: {
+            "mode": state["mode"]
+        },
+        action_costs=RELIABILITY_COSTS,
+        cost_weight=0.5,
+        min_goal_probability=0.75,
+        min_branch_goal_probability=0.50,
+        max_observations_per_node=1,
+    )
+    assert pruned.robust_feasible
+    assert pruned.robust_branch_feasible
+    assert (
+        pruned.robust_branch_constraint_certification
+        == "indeterminate"
+    )
+    assert pruned.constraint_certification == "indeterminate"
     assert result.worst_case_goal_probability == pytest.approx(
         result.robust_best_achievable_min_goal_probability
     )
@@ -786,6 +871,78 @@ def test_scenario_robust_validation():
             robust_objective="maximin",
             observation_model=lambda state, command: dict(state),
         )
+
+
+def test_policy_execution_updates_terminal_hidden_posterior():
+    planner = Planner()
+    planner.mode("battery", ("low", "ready"))
+    planner.mode("regime", ("good", "bad"), priors=(0.5, 0.5))
+    planner.command("action", ("charge",))
+    planner.observable("done")
+    planner.behavior(
+        lambda value: iff(
+            value["done"] == True,
+            value["battery"] == "ready",
+        )
+    )
+    planner.transition(
+        "battery", "low", "ready", command=("action", "charge")
+    )
+    compiled = planner.compile(2)
+
+    def outcomes(state, command):
+        success = 0.9 if state["regime"] == "good" else 0.2
+        return [
+            ({"battery": "ready"}, success),
+            ({}, 1.0 - success),
+        ]
+
+    belief = [
+        ({"battery": "low", "regime": "good"}, 0.5),
+        ({"battery": "low", "regime": "bad"}, 0.5),
+    ]
+    result = compiled.plan_belief(
+        belief=belief,
+        target={"done": True},
+        outcome_model=outcomes,
+        observation_model=lambda state, command: {
+            "meter": state["battery"]
+        },
+        action_costs={"charge": 0.1},
+    )
+    execution = result.execution()
+    assert execution.action == {"action": "charge"}
+    step = execution.advance(outcome={"battery": "ready"})
+
+    assert step.goal_reached
+    assert step.terminal
+    assert step.route.kind == "terminal"
+    assert step.accumulated_cost == pytest.approx(0.1)
+    assert step.posterior_marginals()["regime"] == pytest.approx(
+        {"good": 0.9 / 1.1, "bad": 0.2 / 1.1}
+    )
+    assert execution.action is None
+    with pytest.raises(TypeError):
+        step.posterior[0][0]["regime"] = "bad"
+
+
+def test_robust_policy_execution_requires_realized_scenario():
+    def outcomes(state, command):
+        return [({"mode": "goal"}, 1.0)]
+
+    result = reliability_planner(horizon=2).plan_belief(
+        belief=[({"mode": "bad"}, 1.0)],
+        target={"done": True},
+        outcome_scenarios={"one": outcomes, "two": outcomes},
+        robust_objective="maximin",
+        robust_weight_resolution=2,
+        max_robust_candidates=1,
+        observation_model=lambda state, command: dict(state),
+    )
+    with pytest.raises(ValueError, match="requires outcome_scenario"):
+        result.execution()
+    execution = result.execution(outcome_scenario="one")
+    assert execution.action is not None
 
 
 def test_reliability_certification_composes_tracker_scope():

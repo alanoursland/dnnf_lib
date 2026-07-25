@@ -268,6 +268,23 @@ planner calls before work begins. Results say
 `robust_optimality="weight-grid-heuristic"` and
 `certificate_scope="robust-scenario-weight-grid"`: the computation is
 explicitly bounded and does not claim global robust-policy optimality.
+Inherited `expected_*` fields retain the scenario-weighted values that
+generated the selected candidate; `inherited_metric_scope` labels that
+contract and `selected_scenario_weights` makes the mixture directly
+reconstructible.
+
+The same robust call accepts `min_branch_goal_probability`. Every generated
+common policy is replayed under each named scenario to report the minimum
+continuation probability, limiting scenario and observation path, numeric
+branch feasibility, and best branch floor found on the weight grid. A
+branch-safe policy is selected before maximin utility. Observation fallback
+pruning keeps `robust_branch_constraint_certification="indeterminate"` even
+when the audited aggregate policy meets the numeric floor.
+
+Conditional policy costs stop accumulating on physical paths whose target is
+already satisfied. When noisy telemetry mixes satisfied and unresolved
+states into one posterior, only unresolved posterior mass is charged for the
+continuation action; goal probability retains both portions.
 
 When the input is a `TrackedBelief`, the planner composes tracker uncertainty
 into separate end-to-end action bounds. Results preserve the policy-only

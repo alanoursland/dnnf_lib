@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from itertools import product
 from typing import (
     Callable,
@@ -601,6 +601,297 @@ class BeliefPolicyNode:
 
 
 @dataclass(frozen=True)
+class BeliefPolicyExecutionStep:
+    """One observed execution step and its updated latent belief."""
+
+    action: Mapping[str, object]
+    outcome: Optional[Mapping[str, object]]
+    observation: Optional[Mapping[str, object]]
+    route: Optional[BeliefPolicyRouting]
+    posterior: Tuple[Tuple[Mapping[str, object], float], ...]
+    goal_reached: bool
+    terminal: bool
+    accumulated_cost: float
+    certificate_scope: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "action", _immutable_mapping(self.action))
+        if self.outcome is not None:
+            object.__setattr__(
+                self, "outcome", _immutable_mapping(self.outcome)
+            )
+        if self.observation is not None:
+            object.__setattr__(
+                self,
+                "observation",
+                _immutable_mapping(self.observation),
+            )
+        object.__setattr__(
+            self,
+            "posterior",
+            tuple(
+                (_immutable_mapping(state), probability)
+                for state, probability in self.posterior
+            ),
+        )
+
+    def posterior_marginals(self) -> Dict[str, Dict[object, float]]:
+        """Per-variable marginals of :attr:`posterior`."""
+        out: Dict[str, Dict[object, float]] = {}
+        for state, probability in self.posterior:
+            for name, value in state.items():
+                out.setdefault(name, {})
+                out[name][value] = out[name].get(value, 0.0) + probability
+        return out
+
+
+@dataclass(frozen=True)
+class _BeliefPolicyExecutionContext:
+    initial_belief: Tuple[Tuple[Mapping[str, object], float], ...]
+    outcome_model: Optional[Callable]
+    outcome_scenarios: Tuple[Tuple[str, Callable], ...]
+    observation_model: Callable
+    goal_probability: Callable
+    action_cost: Callable
+
+
+class BeliefPolicyExecution:
+    """Advance a returned conditional policy with real observed evidence."""
+
+    def __init__(
+        self,
+        *,
+        policy: BeliefPolicyNode,
+        belief,
+        outcome_model,
+        observation_model,
+        goal_probability,
+        action_cost,
+        certificate_scope: str,
+    ) -> None:
+        weighted = []
+        total = 0.0
+        for state, mass in belief:
+            numeric = float(mass)
+            if not math.isfinite(numeric) or numeric < 0.0:
+                raise ValueError(
+                    "execution belief masses must be finite and "
+                    "non-negative"
+                )
+            weighted.append((dict(state), numeric))
+            total += numeric
+        if total <= 0.0:
+            raise ValueError(
+                "execution belief must have positive total mass"
+            )
+        self._belief = tuple(
+            (state, mass / total) for state, mass in weighted if mass > 0.0
+        )
+        self._policy: Optional[BeliefPolicyNode] = policy
+        self._outcome_model = outcome_model
+        self._observation_model = observation_model
+        self._goal_probability = goal_probability
+        self._action_cost = action_cost
+        self._certificate_scope = certificate_scope
+        self._accumulated_cost = 0.0
+        self._step = 0
+        self._terminal = self._goal_reached()
+
+    @property
+    def belief(self) -> Tuple[Tuple[Mapping[str, object], float], ...]:
+        return tuple(
+            (_immutable_mapping(state), probability)
+            for state, probability in self._belief
+        )
+
+    @property
+    def action(self) -> Optional[Dict[str, object]]:
+        if self._terminal or self._policy is None:
+            return None
+        return dict(self._policy.action)
+
+    @property
+    def accumulated_cost(self) -> float:
+        return self._accumulated_cost
+
+    @property
+    def terminal(self) -> bool:
+        return self._terminal
+
+    def _goal_reached(self) -> bool:
+        return bool(self._belief) and all(
+            self._goal_probability(state, self._step)
+            >= 1.0 - 1e-12
+            for state, _ in self._belief
+        )
+
+    @staticmethod
+    def _distribution(entries, *, label):
+        checked = []
+        total = 0.0
+        for value, probability in entries:
+            numeric = float(probability)
+            if not math.isfinite(numeric) or numeric < 0.0:
+                raise ValueError(
+                    f"{label} probabilities must be finite and "
+                    f"non-negative; got {probability!r}"
+                )
+            checked.append((dict(value), numeric))
+            total += numeric
+        if not checked or not math.isclose(
+            total, 1.0, rel_tol=1e-6, abs_tol=1e-9
+        ):
+            raise ValueError(
+                f"{label} probabilities must sum to 1; got {total!r}"
+            )
+        return [
+            (value, probability)
+            for value, probability in checked
+            if probability > 0.0
+        ]
+
+    @staticmethod
+    def _normalize_particles(particles):
+        combined = {}
+        total = 0.0
+        for state, mass in particles:
+            key = tuple(sorted(state.items()))
+            if key in combined:
+                combined[key][1] += mass
+            else:
+                combined[key] = [state, mass]
+            total += mass
+        if total <= 0.0:
+            raise ValueError(
+                "observed execution evidence has zero probability"
+            )
+        return tuple(
+            (state, mass / total)
+            for state, mass in combined.values()
+            if mass > 0.0
+        )
+
+    def advance(
+        self,
+        *,
+        outcome: Optional[Mapping[str, object]] = None,
+        observation: Optional[Mapping[str, object]] = None,
+    ) -> BeliefPolicyExecutionStep:
+        """Consume observed next-state fields and optional telemetry."""
+        if self._terminal or self._policy is None:
+            raise RuntimeError("policy execution is already terminal")
+        node = self._policy
+        command = dict(node.action)
+        self._accumulated_cost += float(self._action_cost(command))
+
+        outcome_evidence = dict(outcome) if outcome is not None else None
+        particles = []
+        for state, state_mass in self._belief:
+            entries = self._distribution(
+                list(self._outcome_model(dict(state), dict(command))),
+                label="outcome",
+            )
+            for updates, probability in entries:
+                next_state = dict(state)
+                next_state.update(updates)
+                if (
+                    outcome_evidence is not None
+                    and any(
+                        key not in next_state
+                        or next_state[key] != value
+                        for key, value in outcome_evidence.items()
+                    )
+                ):
+                    continue
+                particles.append(
+                    (next_state, state_mass * probability)
+                )
+        particles = self._normalize_particles(particles)
+
+        if observation is not None:
+            generated = []
+            schema = set()
+            for state, state_mass in particles:
+                supplied = self._observation_model(
+                    dict(state), dict(command)
+                )
+                entries = (
+                    [(supplied, 1.0)]
+                    if isinstance(supplied, Mapping)
+                    else list(supplied)
+                )
+                checked = self._distribution(
+                    entries, label="observation"
+                )
+                for emitted, probability in checked:
+                    schema.update(emitted)
+                    generated.append(
+                        (
+                            state,
+                            state_mass * probability,
+                            emitted,
+                        )
+                    )
+            observed = dict(observation)
+            projected = {
+                key: observed[key] for key in schema if key in observed
+            }
+            particles = self._normalize_particles(
+                [
+                    (state, mass)
+                    for state, mass, emitted in generated
+                    if emitted == projected
+                ]
+            )
+
+        self._belief = particles
+        self._step += 1
+        goal_reached = self._goal_reached()
+        route = None
+        if goal_reached:
+            route = BeliefPolicyRouting(
+                kind="terminal",
+                policy=None,
+                branch=None,
+                projected_observation=(
+                    dict(observation) if observation is not None else {}
+                ),
+            )
+            self._policy = None
+            self._terminal = True
+        elif not node.branches and node.fallback_policy is None:
+            route = node.route(observation or {})
+            self._policy = None
+            self._terminal = True
+        else:
+            if observation is None:
+                raise ValueError(
+                    "a nonterminal policy step requires observation"
+                )
+            route = node.route(observation)
+            if route.policy is None:
+                raise ValueError(
+                    "observation did not route to a continuation policy"
+                )
+            self._policy = route.policy
+            self._terminal = False
+
+        return BeliefPolicyExecutionStep(
+            action=command,
+            outcome=outcome_evidence,
+            observation=(
+                dict(observation) if observation is not None else None
+            ),
+            route=route,
+            posterior=self._belief,
+            goal_reached=goal_reached,
+            terminal=self._terminal,
+            accumulated_cost=self._accumulated_cost,
+            certificate_scope=self._certificate_scope,
+        )
+
+
+@dataclass(frozen=True)
 class BeliefActionCertificate:
     """Policy-only and belief-composed utility and goal-probability bounds
     for one root action.
@@ -634,6 +925,20 @@ class RobustScenarioEvaluation:
     expected_goal_probability: float
     expected_action_cost: float
     expected_utility: float
+    minimum_branch_goal_probability: Optional[float] = None
+    minimum_branch_observation_path: Tuple[
+        Mapping[str, object], ...
+    ] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "minimum_branch_observation_path",
+            tuple(
+                _immutable_mapping(observation)
+                for observation in self.minimum_branch_observation_path
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -646,6 +951,21 @@ class RobustPolicyEvaluation:
     worst_case_scenario: str
     worst_case_expected_utility: float
     worst_case_goal_probability: float
+    worst_case_branch_scenario: Optional[str] = None
+    worst_case_minimum_branch_goal_probability: Optional[float] = None
+    worst_case_branch_observation_path: Tuple[
+        Mapping[str, object], ...
+    ] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "worst_case_branch_observation_path",
+            tuple(
+                _immutable_mapping(observation)
+                for observation in self.worst_case_branch_observation_path
+            ),
+        )
 
     @property
     def action(self) -> Dict[str, object]:
@@ -690,8 +1010,11 @@ class ConditionalBeliefPolicyResult:
     Scenario-robust results expose independently audited per-scenario
     metrics and all deduplicated generated candidates. Their
     ``robust_optimality`` and ``certificate_scope`` explicitly identify the
-    bounded weight-grid search; scalarized policy metrics remain those of
-    the mixture that generated the selected common policy.
+    bounded weight-grid search. ``inherited_metric_scope`` and
+    ``selected_scenario_weights`` identify scalarized policy metrics as those
+    of the mixture that generated the selected common policy. Robust branch
+    fields report the minimum continuation probability, limiting
+    scenario/observation path, feasibility, and pruning-aware certification.
     """
 
     policy: BeliefPolicyNode
@@ -745,11 +1068,84 @@ class ConditionalBeliefPolicyResult:
     robust_optimality: Optional[str] = None
     robust_feasible: Optional[bool] = None
     robust_best_achievable_min_goal_probability: Optional[float] = None
+    inherited_metric_scope: Optional[str] = None
+    selected_scenario_weights: Tuple[Tuple[str, float], ...] = ()
+    worst_case_branch_scenario: Optional[str] = None
+    worst_case_minimum_branch_goal_probability: Optional[float] = None
+    worst_case_branch_observation_path: Tuple[
+        Mapping[str, object], ...
+    ] = ()
+    robust_branch_feasible: Optional[bool] = None
+    robust_branch_constraint_certification: Optional[str] = None
+    robust_best_achievable_min_branch_goal_probability: Optional[
+        float
+    ] = None
+    _execution_context: Optional[
+        _BeliefPolicyExecutionContext
+    ] = field(default=None, repr=False, compare=False)
 
     @property
     def action(self) -> Dict[str, object]:
         """Root action selected after valuing conditional continuations."""
         return dict(self.policy.action)
+
+    def execution(
+        self,
+        belief=None,
+        *,
+        outcome_scenario: Optional[str] = None,
+        outcome_model: Optional[Callable] = None,
+    ) -> BeliefPolicyExecution:
+        """Create execution state that updates belief from real evidence.
+
+        Ordinary results reuse their planning outcome callback. Robust
+        results require either a named ``outcome_scenario`` or an explicit
+        realized ``outcome_model``.
+        """
+        context = self._execution_context
+        if context is None:
+            raise RuntimeError(
+                "this result does not carry policy execution context"
+            )
+        if outcome_scenario is not None and outcome_model is not None:
+            raise ValueError(
+                "supply either outcome_scenario or outcome_model, not both"
+            )
+        scenarios = dict(context.outcome_scenarios)
+        selected_model = outcome_model
+        if scenarios:
+            if selected_model is None:
+                if outcome_scenario is None:
+                    raise ValueError(
+                        "robust policy execution requires "
+                        "outcome_scenario or outcome_model"
+                    )
+                if outcome_scenario not in scenarios:
+                    raise ValueError(
+                        f"unknown outcome scenario {outcome_scenario!r}; "
+                        f"expected one of {tuple(scenarios)!r}"
+                    )
+                selected_model = scenarios[outcome_scenario]
+        else:
+            if outcome_scenario is not None:
+                raise ValueError(
+                    "outcome_scenario is only valid for robust results"
+                )
+            if selected_model is None:
+                selected_model = context.outcome_model
+        if selected_model is None:
+            raise RuntimeError("policy execution has no outcome model")
+        return BeliefPolicyExecution(
+            policy=self.policy,
+            belief=(
+                context.initial_belief if belief is None else belief
+            ),
+            outcome_model=selected_model,
+            observation_model=context.observation_model,
+            goal_probability=context.goal_probability,
+            action_cost=context.action_cost,
+            certificate_scope=self.certificate_scope,
+        )
 
     @property
     def expected_goal_probability(self) -> float:
@@ -1161,7 +1557,13 @@ class CompiledPlanner:
         density and ``max_robust_candidates`` is a hard generation cap.
         Results expose every scenario/candidate evaluation and label search
         optimality ``"weight-grid-heuristic"`` rather than claiming global
-        robust optimality.
+        robust optimality. Inherited ``expected_*`` fields remain scoped to
+        the selected candidate's generating mixture; the result exposes
+        ``inherited_metric_scope`` and ``selected_scenario_weights`` directly.
+        ``min_branch_goal_probability`` additionally requires every audited
+        observation continuation to meet the floor in every scenario and
+        reports the limiting scenario/path. Observation fallback pruning
+        keeps branch certification indeterminate.
 
         Unlike ``belief`` (validated and normalized above), the
         probabilities returned by ``outcome_model`` and ``observation_model``
@@ -1676,6 +2078,24 @@ class CompiledPlanner:
                         )
                 return expanded_outcomes
 
+            def split_terminal_belief(branch_belief, step):
+                terminal_mass = 0.0
+                active_belief = []
+                for state, probability in branch_belief:
+                    state_goal = conditional_goal_probability(
+                        step_evidence(
+                            state,
+                            step,
+                            include_observables=True,
+                        ),
+                        step,
+                    )
+                    if state_goal >= 1.0 - 1e-12:
+                        terminal_mass += probability
+                    else:
+                        active_belief.append((state, probability))
+                return terminal_mass, active_belief
+
             def terminal_node(
                 command: Dict[str, object],
                 immediate_cost: float,
@@ -1683,28 +2103,35 @@ class CompiledPlanner:
                     Tuple[Dict[str, object], float]
                 ],
                 step: int,
+                *,
+                prior_goal_probability: float = 0.0,
+                execution_probability: float = 1.0,
             ) -> BeliefPolicyNode:
-                expected_goal = sum(
-                    probability
-                    * conditional_goal_probability(
-                        step_evidence(
-                            next_state,
+                expected_goal = (
+                    prior_goal_probability
+                    + sum(
+                        probability
+                        * conditional_goal_probability(
+                            step_evidence(
+                                next_state,
+                                step + 1,
+                                include_observables=True,
+                            ),
                             step + 1,
-                            include_observables=True,
-                        ),
-                        step + 1,
+                        )
+                        for next_state, probability in expanded_outcomes
                     )
-                    for next_state, probability in expanded_outcomes
                 )
+                expected_cost = execution_probability * immediate_cost
                 value = (
                     goal_reward * expected_goal
-                    - cost_weight * immediate_cost
+                    - cost_weight * expected_cost
                 )
                 return BeliefPolicyNode(
                     action=command,
                     immediate_action_cost=immediate_cost,
                     expected_goal_probability=expected_goal,
-                    expected_action_cost=immediate_cost,
+                    expected_action_cost=expected_cost,
                     expected_utility=value,
                     utility_upper_bound=value,
                     branches=(),
@@ -1869,13 +2296,22 @@ class CompiledPlanner:
                 ],
                 step: int,
             ) -> Tuple[BeliefPolicyNode, Tuple[BeliefPolicyNode, ...]]:
+                terminal_mass, active_belief = split_terminal_belief(
+                    branch_belief, step
+                )
+                active_mass = sum(
+                    probability for _, probability in active_belief
+                )
                 candidates: List[BeliefPolicyNode] = []
                 for action in action_values:
                     command = {command_name: action}
                     expanded_outcomes = expand_action(
-                        branch_belief, step, action, command
+                        active_belief, step, action, command
                     )
                     immediate_cost = action_cost(action, command)
+                    expected_immediate_cost = (
+                        active_mass * immediate_cost
+                    )
                     if step + 1 == self.horizon:
                         candidates.append(
                             terminal_node(
@@ -1883,6 +2319,8 @@ class CompiledPlanner:
                                 immediate_cost,
                                 expanded_outcomes,
                                 step,
+                                prior_goal_probability=terminal_mass,
+                                execution_probability=active_mass,
                             )
                         )
                         if step == 0:
@@ -1899,11 +2337,13 @@ class CompiledPlanner:
                     ) = observation_groups(expanded_outcomes, command)
 
                     branches: List[BeliefPolicyBranch] = []
-                    expected_goal = 0.0
+                    expected_goal = terminal_mass
                     expected_continuation_cost = 0.0
-                    continuation_utility_upper_bound = 0.0
-                    continuation_goal_upper_bound = 0.0
-                    retained_path_probability = 0.0
+                    continuation_utility_upper_bound = (
+                        terminal_mass * goal_reward
+                    )
+                    continuation_goal_upper_bound = terminal_mass
+                    retained_path_probability = terminal_mass
 
                     for group in retained_groups:
                         probability = float(group["mass"])
@@ -1967,7 +2407,8 @@ class CompiledPlanner:
                         )
 
                     expected_cost = (
-                        immediate_cost + expected_continuation_cost
+                        expected_immediate_cost
+                        + expected_continuation_cost
                     )
                     candidates.append(
                         BeliefPolicyNode(
@@ -1981,7 +2422,8 @@ class CompiledPlanner:
                             ),
                             utility_upper_bound=(
                                 continuation_utility_upper_bound
-                                - cost_weight * immediate_cost
+                                - cost_weight
+                                * expected_immediate_cost
                             ),
                             branches=tuple(
                                 sorted(
@@ -2084,25 +2526,36 @@ class CompiledPlanner:
                 ``branch_floor`` is the stricter per-branch variant and is
                 applied to every child frontier.
                 """
+                terminal_mass, active_belief = split_terminal_belief(
+                    branch_belief, step
+                )
+                active_mass = sum(
+                    probability for _, probability in active_belief
+                )
                 points: List[Tuple[float, float, BeliefPolicyNode]] = []
                 for action in action_values:
                     action_root = action if step == 0 else root_action
                     command = {command_name: action}
                     expanded_outcomes = expand_action(
-                        branch_belief, step, action, command
+                        active_belief, step, action, command
                     )
                     immediate_cost = action_cost(action, command)
+                    expected_immediate_cost = (
+                        active_mass * immediate_cost
+                    )
                     if step + 1 == self.horizon:
                         node = terminal_node(
                             command,
                             immediate_cost,
                             expanded_outcomes,
                             step,
+                            prior_goal_probability=terminal_mass,
+                            execution_probability=active_mass,
                         )
                         points.append(
                             (
                                 node.expected_goal_probability,
-                                immediate_cost,
+                                expected_immediate_cost,
                                 node,
                             )
                         )
@@ -2141,8 +2594,8 @@ class CompiledPlanner:
 
                     child_frontiers = []
                     action_allowed = True
-                    goal_upper = 0.0
-                    utility_upper = 0.0
+                    goal_upper = terminal_mass
+                    utility_upper = terminal_mass * goal_reward
                     for probability, posterior, group in branch_specs:
                         frontier = solve_policy_frontier(
                             posterior,
@@ -2176,7 +2629,7 @@ class CompiledPlanner:
                     if not action_allowed:
                         continue
 
-                    combos = [(0.0, 0.0, ())]
+                    combos = [(terminal_mass, 0.0, ())]
                     for (probability, _, _), frontier in zip(
                         branch_specs, child_frontiers
                     ):
@@ -2229,7 +2682,10 @@ class CompiledPlanner:
                                         child,
                                     )
                                 )
-                        expected_cost = immediate_cost + continuation_cost
+                        expected_cost = (
+                            expected_immediate_cost
+                            + continuation_cost
+                        )
                         node = BeliefPolicyNode(
                             action=command,
                             immediate_action_cost=immediate_cost,
@@ -2241,7 +2697,8 @@ class CompiledPlanner:
                             ),
                             utility_upper_bound=(
                                 utility_upper
-                                - cost_weight * immediate_cost
+                                - cost_weight
+                                * expected_immediate_cost
                             ),
                             branches=tuple(
                                 sorted(
@@ -2673,6 +3130,32 @@ class CompiledPlanner:
                     supplied_retained_mass
                 ),
                 certificate_scope=certificate_scope,
+                _execution_context=_BeliefPolicyExecutionContext(
+                    initial_belief=tuple(
+                        (dict(state), probability)
+                        for state, probability in checked_states
+                    ),
+                    outcome_model=outcome_model,
+                    outcome_scenarios=(),
+                    observation_model=observation_model,
+                    goal_probability=(
+                        lambda state, step: (
+                            conditional_goal_probability(
+                                step_evidence(
+                                    state,
+                                    step,
+                                    include_observables=True,
+                                ),
+                                step,
+                            )
+                        )
+                    ),
+                    action_cost=(
+                        lambda command: action_cost(
+                            command[command_name], command
+                        )
+                    ),
+                ),
                 **constraint_extras,
             )
 
@@ -2975,11 +3458,6 @@ class CompiledPlanner:
                 "scenario-robust planning requires an observation_model "
                 "and horizon of at least 2"
             )
-        if min_branch_goal_probability is not None:
-            raise NotImplementedError(
-                "scenario-robust min_branch_goal_probability is not yet "
-                "supported"
-            )
         if not isinstance(outcome_scenarios, Mapping):
             raise ValueError("outcome_scenarios must be a mapping")
         scenarios = tuple(outcome_scenarios.items())
@@ -3037,7 +3515,11 @@ class CompiledPlanner:
                 robust_weight_resolution, len(scenarios)
             )
         )
-        call_multiplier = 2 if min_goal_probability is not None else 1
+        has_constraint = (
+            min_goal_probability is not None
+            or min_branch_goal_probability is not None
+        )
+        call_multiplier = 2 if has_constraint else 1
         required_calls = len(weight_counts) * call_multiplier
         if required_calls > max_robust_candidates:
             raise ValueError(
@@ -3111,12 +3593,20 @@ class CompiledPlanner:
                     weighted_belief.append(
                         (tagged, scenario_weight * float(mass))
                     )
-            floors = (
-                (None, min_goal_probability)
-                if min_goal_probability is not None
-                else (None,)
+            constraint_settings = (
+                (
+                    (None, None),
+                    (
+                        min_goal_probability,
+                        min_branch_goal_probability,
+                    ),
+                )
+                if has_constraint
+                else ((None, None),)
             )
-            for scalar_floor in floors:
+            for scalar_goal_floor, scalar_branch_floor in (
+                constraint_settings
+            ):
                 result = self.plan_belief(
                     weighted_belief,
                     target,
@@ -3134,7 +3624,8 @@ class CompiledPlanner:
                         min_observation_probability
                     ),
                     max_observations_per_node=max_observations_per_node,
-                    min_goal_probability=scalar_floor,
+                    min_goal_probability=scalar_goal_floor,
+                    min_branch_goal_probability=scalar_branch_floor,
                     max_frontier_points=max_frontier_points,
                     control=control,
                 )
@@ -3254,12 +3745,28 @@ class CompiledPlanner:
                 (state, mass / total) for state, mass in weighted
             ]
 
-            def execute(node, branch_belief, step):
+            def execute(node, branch_belief, step, observation_path=()):
+                reached_mass = 0.0
+                active_belief = []
+                for state, state_mass in branch_belief:
+                    reached = goal_probability(state, step)
+                    if reached >= 1.0 - 1e-12:
+                        reached_mass += state_mass
+                    else:
+                        active_belief.append((state, state_mass))
+                if not active_belief:
+                    return reached_mass, 0.0, []
+
                 command = dict(node.action)
                 action = command[command_name]
-                immediate_cost = scenario_action_cost(action, command)
+                active_mass = sum(
+                    state_mass for _, state_mass in active_belief
+                )
+                immediate_cost = (
+                    active_mass * scenario_action_cost(action, command)
+                )
                 expanded = []
-                for state, state_mass in branch_belief:
+                for state, state_mass in active_belief:
                     outcomes = checked_distribution(
                         list(model(dict(state), dict(command))),
                         label="outcome",
@@ -3295,23 +3802,17 @@ class CompiledPlanner:
                             )
                         )
                 if step + 1 == self.horizon:
-                    expected_goal = sum(
-                        mass * goal_probability(state, step + 1)
-                        for state, mass in expanded
+                    expected_goal = (
+                        reached_mass
+                        + sum(
+                            mass * goal_probability(state, step + 1)
+                            for state, mass in expanded
+                        )
                     )
-                    return expected_goal, immediate_cost
-
-                expected_goal = 0.0
-                continuing = []
-                for state, mass in expanded:
-                    reached = goal_probability(state, step + 1)
-                    if reached >= 1.0 - 1e-12:
-                        expected_goal += mass
-                    else:
-                        continuing.append((state, mass))
+                    return expected_goal, immediate_cost, []
 
                 groups = {}
-                for state, outcome_mass in continuing:
+                for state, outcome_mass in expanded:
                     for observation, probability in (
                         normalized_observations(state, command)
                     ):
@@ -3335,7 +3836,9 @@ class CompiledPlanner:
                             ]
                         group["mass"] += branch_mass
 
+                expected_goal = reached_mass
                 continuation_cost = 0.0
+                branch_evaluations = []
                 for group in groups.values():
                     probability = float(group["mass"])
                     posterior = [
@@ -3345,14 +3848,25 @@ class CompiledPlanner:
                     routed = node.route(group["observation"])
                     if routed.policy is None:
                         return None
-                    child_goal, child_cost = execute(
-                        routed.policy, posterior, step + 1
+                    child_path = observation_path + (
+                        dict(group["observation"]),
+                    )
+                    child_goal, child_cost, descendants = execute(
+                        routed.policy,
+                        posterior,
+                        step + 1,
+                        child_path,
                     )
                     expected_goal += probability * child_goal
                     continuation_cost += probability * child_cost
+                    branch_evaluations.append(
+                        (child_path, child_goal)
+                    )
+                    branch_evaluations.extend(descendants)
                 return (
                     expected_goal,
                     immediate_cost + continuation_cost,
+                    branch_evaluations,
                 )
 
             return execute(policy, weighted, 0)
@@ -3367,7 +3881,15 @@ class CompiledPlanner:
                 if audited is None:
                     valid = False
                     break
-                goal, cost = audited
+                goal, cost, branch_evaluations = audited
+                minimum_branch = (
+                    min(
+                        branch_evaluations,
+                        key=lambda item: item[1],
+                    )
+                    if branch_evaluations
+                    else None
+                )
                 scenario_evaluations.append(
                     RobustScenarioEvaluation(
                         scenario=name,
@@ -3376,6 +3898,16 @@ class CompiledPlanner:
                         expected_utility=(
                             goal_reward * goal - cost_weight * cost
                         ),
+                        minimum_branch_goal_probability=(
+                            minimum_branch[1]
+                            if minimum_branch is not None
+                            else None
+                        ),
+                        minimum_branch_observation_path=(
+                            minimum_branch[0]
+                            if minimum_branch is not None
+                            else ()
+                        ),
                     )
                 )
             if not valid:
@@ -3383,6 +3915,21 @@ class CompiledPlanner:
             worst_utility = min(
                 scenario_evaluations,
                 key=lambda item: item.expected_utility,
+            )
+            branch_scenarios = [
+                evaluation
+                for evaluation in scenario_evaluations
+                if evaluation.minimum_branch_goal_probability is not None
+            ]
+            worst_branch = (
+                min(
+                    branch_scenarios,
+                    key=lambda item: (
+                        item.minimum_branch_goal_probability
+                    ),
+                )
+                if branch_scenarios
+                else None
             )
             robust_candidates.append(
                 RobustPolicyEvaluation(
@@ -3396,6 +3943,21 @@ class CompiledPlanner:
                     worst_case_goal_probability=min(
                         item.expected_goal_probability
                         for item in scenario_evaluations
+                    ),
+                    worst_case_branch_scenario=(
+                        worst_branch.scenario
+                        if worst_branch is not None
+                        else None
+                    ),
+                    worst_case_minimum_branch_goal_probability=(
+                        worst_branch.minimum_branch_goal_probability
+                        if worst_branch is not None
+                        else None
+                    ),
+                    worst_case_branch_observation_path=(
+                        worst_branch.minimum_branch_observation_path
+                        if worst_branch is not None
+                        else ()
                     ),
                 )
             )
@@ -3411,26 +3973,51 @@ class CompiledPlanner:
             candidate.worst_case_goal_probability
             for candidate in robust_candidates
         )
-        feasible_candidates = (
-            [
-                candidate
-                for candidate in robust_candidates
-                if candidate.worst_case_goal_probability
-                >= min_goal_probability - 1e-9
-            ]
-            if min_goal_probability is not None
-            else list(robust_candidates)
-        )
-        robust_feasible = bool(feasible_candidates)
-        if min_goal_probability is not None and not robust_feasible:
-            selected = max(
-                robust_candidates,
-                key=lambda candidate: (
-                    candidate.worst_case_goal_probability,
-                    candidate.worst_case_expected_utility,
-                ),
+        branch_values = [
+            candidate.worst_case_minimum_branch_goal_probability
+            for candidate in robust_candidates
+            if (
+                candidate.worst_case_minimum_branch_goal_probability
+                is not None
             )
-        else:
+        ]
+        robust_best_branch = (
+            max(branch_values) if branch_values else None
+        )
+
+        def meets_goal_constraint(candidate):
+            return (
+                min_goal_probability is None
+                or candidate.worst_case_goal_probability
+                >= min_goal_probability - 1e-9
+            )
+
+        def meets_branch_constraint(candidate):
+            return (
+                min_branch_goal_probability is None
+                or (
+                    candidate.worst_case_minimum_branch_goal_probability
+                    is not None
+                    and (
+                        candidate
+                        .worst_case_minimum_branch_goal_probability
+                        >= min_branch_goal_probability - 1e-9
+                    )
+                )
+            )
+
+        feasible_candidates = [
+            candidate
+            for candidate in robust_candidates
+            if (
+                meets_goal_constraint(candidate)
+                and meets_branch_constraint(candidate)
+            )
+        ]
+        robust_feasible = (
+            bool(feasible_candidates) if has_constraint else None
+        )
+        if feasible_candidates:
             selected = max(
                 feasible_candidates,
                 key=lambda candidate: (
@@ -3438,13 +4025,78 @@ class CompiledPlanner:
                     candidate.worst_case_goal_probability,
                 ),
             )
+        elif min_branch_goal_probability is not None:
+            branch_feasible_candidates = [
+                candidate
+                for candidate in robust_candidates
+                if meets_branch_constraint(candidate)
+            ]
+            if branch_feasible_candidates:
+                selected = max(
+                    branch_feasible_candidates,
+                    key=lambda candidate: (
+                        candidate.worst_case_goal_probability,
+                        candidate.worst_case_expected_utility,
+                    ),
+                )
+            else:
+                selected = max(
+                    robust_candidates,
+                    key=lambda candidate: (
+                        candidate
+                        .worst_case_minimum_branch_goal_probability
+                        if candidate
+                        .worst_case_minimum_branch_goal_probability
+                        is not None
+                        else -math.inf,
+                        candidate.worst_case_goal_probability,
+                        candidate.worst_case_expected_utility,
+                    ),
+                )
+        else:
+            selected = max(
+                robust_candidates,
+                key=lambda candidate: (
+                    candidate.worst_case_goal_probability,
+                    candidate.worst_case_expected_utility,
+                ),
+            )
         selected_source = valid_sources[
             policy_signature(selected.policy)
         ]
+
+        def policy_uses_fallback(node):
+            return (
+                node.fallback_policy is not None
+                or any(
+                    branch.policy is not None
+                    and policy_uses_fallback(branch.policy)
+                    for branch in node.branches
+                )
+            )
+
+        selected_branch_feasible = (
+            meets_branch_constraint(selected)
+            if min_branch_goal_probability is not None
+            else None
+        )
+        branch_certification = None
+        if min_branch_goal_probability is not None:
+            branch_certification = (
+                "certified-feasible"
+                if (
+                    selected_branch_feasible
+                    and not policy_uses_fallback(selected.policy)
+                )
+                else "indeterminate"
+            )
         constraint_updates = {}
-        if min_goal_probability is not None:
+        if has_constraint:
             constraint_updates = {
                 "goal_probability_constraint": min_goal_probability,
+                "branch_goal_probability_constraint": (
+                    min_branch_goal_probability
+                ),
                 "feasible": robust_feasible,
                 "best_achievable_goal_probability": robust_best_goal,
                 "best_achievable_goal_probability_upper_bound": 1.0,
@@ -3453,7 +4105,11 @@ class CompiledPlanner:
                 ),
                 "constraint_certification": (
                     "certified-feasible"
-                    if robust_feasible
+                    if (
+                        robust_feasible
+                        and branch_certification
+                        != "indeterminate"
+                    )
                     else "indeterminate"
                 ),
             }
@@ -3471,6 +4127,10 @@ class CompiledPlanner:
                 selected.scenario_evaluations
             ),
             robust_policy_evaluations=tuple(robust_candidates),
+            inherited_metric_scope=(
+                "scenario-weighted-candidate-generation"
+            ),
+            selected_scenario_weights=selected.scenario_weights,
             worst_case_scenario=selected.worst_case_scenario,
             worst_case_expected_utility=(
                 selected.worst_case_expected_utility
@@ -3481,13 +4141,40 @@ class CompiledPlanner:
             robust_candidate_count=len(robust_candidates),
             robust_weight_resolution=robust_weight_resolution,
             robust_optimality="weight-grid-heuristic",
-            robust_feasible=(
-                robust_feasible
-                if min_goal_probability is not None
-                else None
-            ),
+            robust_feasible=robust_feasible,
             robust_best_achievable_min_goal_probability=(
                 robust_best_goal
+            ),
+            worst_case_branch_scenario=(
+                selected.worst_case_branch_scenario
+            ),
+            worst_case_minimum_branch_goal_probability=(
+                selected.worst_case_minimum_branch_goal_probability
+            ),
+            worst_case_branch_observation_path=(
+                selected.worst_case_branch_observation_path
+            ),
+            robust_branch_feasible=selected_branch_feasible,
+            robust_branch_constraint_certification=(
+                branch_certification
+            ),
+            robust_best_achievable_min_branch_goal_probability=(
+                robust_best_branch
+            ),
+            _execution_context=_BeliefPolicyExecutionContext(
+                initial_belief=tuple(
+                    (dict(state), float(mass))
+                    for state, mass in original_belief
+                ),
+                outcome_model=None,
+                outcome_scenarios=scenarios,
+                observation_model=observation_model,
+                goal_probability=goal_probability,
+                action_cost=(
+                    lambda command: scenario_action_cost(
+                        command[command_name], command
+                    )
+                ),
             ),
             **constraint_updates,
         )
